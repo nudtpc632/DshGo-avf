@@ -1382,6 +1382,19 @@ def cmd_assemble(args):
         report["convertedHardlinks"].append("%s -> %s" % (p, target))
 
     # 1b. extra Architecture: all packages (e.g. tzdata), registered in the dpkg database
+    # Ubuntu Base is usr-merged (bin, sbin, lib are symlinks into usr/). Some debs
+    # (busybox-static) still ship pre-merge paths; dpkg would place them through the
+    # symlink, so redirect members whose ancestor is a base symlink to its target.
+    def deb_path(p):
+        parts = p.split("/")
+        for i in range(1, len(parts)):
+            anc = "/".join(parts[:i])
+            e = entries.get(anc)
+            if e is not None and e.kind == "symlink":
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(anc), e.link))
+                return target + "/" + "/".join(parts[i:])
+        return p
+
     for deb in args.deb or []:
         ctl_tar, data_tar = read_deb(deb)
         with tarfile.open(fileobj=io.BytesIO(ctl_tar), mode="r:") as t:
@@ -1397,6 +1410,7 @@ def cmd_assemble(args):
                 if base_drop(p):
                     drop("deb-docs", p, m.size)
                     continue
+                p = deb_path(p)
                 if m.isdir():
                     entries.setdefault(p, Entry("dir", m.mode, origin="deb"))
                 elif m.isreg():
@@ -1404,11 +1418,11 @@ def cmd_assemble(args):
                 elif m.issym():
                     entries[p] = Entry("symlink", 0o777, link=m.linkname, origin="deb")
                 elif m.islnk():  # hard link -> independent copy (target precedes it in the tar)
-                    src = entries.get(norm_member(m.linkname))
+                    src = entries.get(deb_path(norm_member(m.linkname)))
                     if src is None or src.kind != "file":
                         raise SystemExit("hard link %s -> %s without target in %s" % (m.name, m.linkname, deb))
                     entries[p] = Entry("file", m.mode, data=src.data, origin="deb")
-                    report["convertedHardlinks"].append("%s -> %s" % (p, norm_member(m.linkname)))
+                    report["convertedHardlinks"].append("%s -> %s" % (p, deb_path(norm_member(m.linkname))))
                 else:
                     raise SystemExit("unsupported member %s in %s" % (m.name, deb))
                 listed.append("/" + p)
