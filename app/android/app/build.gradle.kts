@@ -23,6 +23,9 @@ val hasWholeReleaseKey = listOf("storeFile", "keyAlias").all { !keyProps.getProp
 val runtimeOut = rootProject.file("../../runtime/out")
 // libtawcroot.so for the opt-in tawcroot launch method (runtime/tawcroot/build.py; missing = unavailable).
 val tawcrootOut = rootProject.file("../../runtime/out-tawcroot")
+// AVF VM image + libvsock_client.so for the opt-in virtual machine backend
+// (runtime/build-vm-image.sh, runtime/vm/build-vsock-jni.sh; missing = unavailable).
+val vmOut = rootProject.file("../../runtime/out-vm")
 
 // versionCode is the build minute, same encoding as tooling/build_number.py:
 // (year - 2026) * 10^8 + MMDDhhmm at UTC+8. tooling/build-apk.sh passes it as
@@ -74,10 +77,13 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(File(tawcrootOut, "jniLibs"))
+            jniLibs.srcDir(File(vmOut, "jniLibs"))
         }
         getByName("arm64") {
             assets.srcDir(File(runtimeOut, "arm64-v8a/assets"))
             jniLibs.srcDir(File(runtimeOut, "arm64-v8a/jniLibs"))
+            // The VM image is arm64-only (microdroid kernel); x64 builds simply lack it.
+            assets.srcDir(File(vmOut, "assets"))
         }
         getByName("x64") {
             assets.srcDir(File(runtimeOut, "x86_64/assets"))
@@ -104,7 +110,9 @@ android {
     }
 
     androidResources {
-        noCompress += listOf("gz", "xz", "zst", "tar")
+        // ext4: AvfImage.install reads the VM image's length via assets.openFd(),
+        // which only works on uncompressed assets.
+        noCompress += listOf("gz", "xz", "zst", "tar", "ext4")
     }
 
     signingConfigs {
