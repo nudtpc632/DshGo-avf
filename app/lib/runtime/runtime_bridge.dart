@@ -170,6 +170,10 @@ class RuntimeStatus {
     this.tawcEngineEnabled = false,
     this.tawcEngineAvailable = false,
     this.tawcEngineActive = false,
+    this.avfEngineEnabled = false,
+    this.avfEngineAvailable = false,
+    this.avfEngineActive = false,
+    this.avfEngineFailed = false,
     this.currentExecutionMode,
     this.launchSelectedMode,
     this.launchSpawned = false,
@@ -238,6 +242,14 @@ class RuntimeStatus {
   final bool tawcEngineAvailable;
   final bool tawcEngineActive;
 
+  /// The opt-in AVF (virtual machine) backend; at most one launch method is on.
+  final bool avfEngineEnabled;
+  final bool avfEngineAvailable;
+  final bool avfEngineActive;
+
+  /// The AVF backend failed to start DSH with this image; compatible launch until re-enabled.
+  final bool avfEngineFailed;
+
   /// Native process observation, never inferred from the saved direct preference.
   final String? currentExecutionMode;
 
@@ -261,6 +273,10 @@ class RuntimeStatus {
     'tawcEngineEnabled': tawcEngineEnabled,
     'tawcEngineAvailable': tawcEngineAvailable,
     'tawcEngineActive': tawcEngineActive,
+    'avfEngineEnabled': avfEngineEnabled,
+    'avfEngineAvailable': avfEngineAvailable,
+    'avfEngineActive': avfEngineActive,
+    'avfEngineFailed': avfEngineFailed,
     'currentExecutionMode': currentExecutionMode,
     'launchSelectedMode': launchSelectedMode,
     'launchSpawned': launchSpawned,
@@ -317,6 +333,10 @@ class RuntimeStatus {
     tawcEngineEnabled: map['tawcEngineEnabled'] == true,
     tawcEngineAvailable: map['tawcEngineAvailable'] == true,
     tawcEngineActive: map['tawcEngineActive'] == true,
+    avfEngineEnabled: map['avfEngineEnabled'] == true,
+    avfEngineAvailable: map['avfEngineAvailable'] == true,
+    avfEngineActive: map['avfEngineActive'] == true,
+    avfEngineFailed: map['avfEngineFailed'] == true,
     currentExecutionMode: map['currentExecutionMode'] as String?,
     launchSelectedMode: map['launchSelectedMode'] as String?,
     launchSpawned: map['launchSpawned'] == true,
@@ -638,6 +658,7 @@ class RuntimeBridge {
   /// Takes effect on the next start; native code rejects changes while active.
   Future<void> setDirectEngine(bool enabled) => _methods.invokeMethod<void>('setDirectEngine', {'enabled': enabled});
   Future<void> setTawcEngine(bool enabled) => _methods.invokeMethod<void>('setTawcEngine', {'enabled': enabled});
+  Future<void> setAvfEngine(bool enabled) => _methods.invokeMethod<void>('setAvfEngine', {'enabled': enabled});
 
   /// Output around the last failure, tokens masked.
   Future<List<String>> failureLog() async => (await _methods.invokeListMethod<String>('failureLog')) ?? const [];

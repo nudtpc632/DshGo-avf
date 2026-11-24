@@ -22370,6 +22370,36 @@ abstract class L10n {
   /// **'这个安装包不含 tawcroot，或系统低于 Android 10。'**
   String get phoneTawcUnavailable;
 
+  /// No description provided for @phoneAvfEngine.
+  ///
+  /// In zh, this message translates to:
+  /// **'虚拟机后端（AVF）'**
+  String get phoneAvfEngine;
+
+  /// No description provided for @phoneAvfHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'实验功能，默认关闭，下次启动生效，和其他启动方式互斥。在系统虚拟机里运行引擎，与手机系统隔离。启动不成功会自动改回兼容启动。'**
+  String get phoneAvfHint;
+
+  /// No description provided for @phoneAvfFailedHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'这台设备上虚拟机没有启动成功，已改用兼容启动。停止引擎后打开可再试一次。'**
+  String get phoneAvfFailedHint;
+
+  /// No description provided for @phoneAvfUnavailable.
+  ///
+  /// In zh, this message translates to:
+  /// **'这个安装包不含虚拟机镜像，或这台设备不支持系统虚拟机，或尚未授予虚拟机权限（需 adb shell pm grant）。'**
+  String get phoneAvfUnavailable;
+
+  /// No description provided for @phoneLaunchAvf.
+  ///
+  /// In zh, this message translates to:
+  /// **'虚拟机（AVF）'**
+  String get phoneLaunchAvf;
+
   /// No description provided for @phoneLaunchTawcroot.
   ///
   /// In zh, this message translates to:

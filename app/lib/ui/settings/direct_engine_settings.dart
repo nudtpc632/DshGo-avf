@@ -7,8 +7,9 @@ import '../../runtime/runtime_state.dart';
 import '../common/brief_notice.dart';
 import 'settings_widgets.dart';
 
-/// Direct launch and tawcroot launch, both off by default and at most one on; a
-/// change applies only after a deliberate engine stop/start.
+/// Direct launch, tawcroot launch and the AVF virtual machine backend, all off
+/// by default and at most one on; a change applies only after a deliberate
+/// engine stop/start.
 class DirectEngineSettings extends ConsumerStatefulWidget {
   const DirectEngineSettings({super.key});
 
@@ -42,6 +43,15 @@ class _DirectEngineSettingsState extends ConsumerState<DirectEngineSettings> {
     final tawcFailed = fallback == 'tawcrootFailed';
     final tawcEnabled =
         runtime.loaded && stopped && !_saving && (status.tawcEngineAvailable || status.tawcEngineEnabled);
+    final avfEnabled =
+        runtime.loaded && stopped && !_saving && (status.avfEngineAvailable || status.avfEngineEnabled);
+    final avfHint = !status.avfEngineAvailable
+        ? l10n.phoneAvfUnavailable
+        : status.avfEngineFailed && !status.avfEngineEnabled
+        ? l10n.phoneAvfFailedHint
+        : !stopped
+        ? l10n.phoneDirectStopFirst
+        : l10n.phoneAvfHint;
     final tawcHint = !status.tawcEngineAvailable
         ? l10n.phoneTawcUnavailable
         : tawcFailed && !status.tawcEngineEnabled
@@ -88,8 +98,25 @@ class _DirectEngineSettingsState extends ConsumerState<DirectEngineSettings> {
           value: status.tawcEngineEnabled,
           onChanged: tawcEnabled ? _changeTawc : null,
         ),
+        SettingsSwitchTile(
+          title: l10n.phoneAvfEngine,
+          subtitle: avfHint,
+          value: status.avfEngineEnabled,
+          onChanged: avfEnabled ? _changeAvf : null,
+        ),
       ],
     );
+  }
+
+  Future<void> _changeAvf(bool value) async {
+    setState(() => _saving = true);
+    try {
+      await ref.read(runtimeBridgeProvider).setAvfEngine(value);
+    } catch (_) {
+      if (mounted) showBriefNotice(context, context.l10n.phoneDirectChangeFailed);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Future<void> _changeTawc(bool value) async {
