@@ -47,6 +47,7 @@ class PhoneBridge(
     @Volatile private var running = false
     private var local: LocalServerSocket? = null
     private var tcp: ServerSocket? = null
+    private var vsock: PhoneVsockListener? = null
     private val open = Collections.synchronizedSet(HashSet<Closeable>())
     private val calls = Executors.newCachedThreadPool { r -> Thread(r, "dsh-phone-call").apply { isDaemon = true } }
     private val slots = Semaphore(MAX_CONNECTIONS)
@@ -106,11 +107,33 @@ class PhoneBridge(
         return next
     }
 
+    /**
+     * AVF transport: the guest relay dials vsock host:3083 (abstract sockets do
+     * not cross the VM boundary); [PhoneVsockListener] pumps it into the bridge's
+     * loopback TCP listener. Requires [addTcp]; returns the endpoint the guest
+     * bridge.json must carry.
+     */
+    @Synchronized
+    fun addVsock(): PhoneGuest.Endpoint? {
+        val ep = endpoint ?: return null
+        if (!running) return null
+        if (ep.vsockPort != null) return ep
+        val withTcp = if (ep.tcpPort != null) ep else addTcp() ?: return null
+        val listener = PhoneVsockListener(log)
+        if (!listener.start(withTcp.tcpPort!!)) return null
+        vsock = listener
+        val next = withTcp.copy(vsockPort = PhoneVsockListener.PORT)
+        endpoint = next
+        return next
+    }
+
     @Synchronized
     fun stop() {
-        if (!running && local == null && tcp == null) return
+        if (!running && local == null && tcp == null && vsock == null) return
         running = false
         endpoint = null
+        vsock?.stop()
+        vsock = null
         local?.let { s ->
             // close() alone doesn't wake accept() on every Android version: shut the fd down first.
             runCatching { Os.shutdown(s.fileDescriptor, OsConstants.SHUT_RDWR) }

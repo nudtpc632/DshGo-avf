@@ -467,6 +467,35 @@ class PhoneControl private constructor(private val app: Context) : PhoneEnv, Con
         }
     }
 
+    /**
+     * AVF launch: the guest image bakes the relay/overlay (PhoneGuest.vmFiles);
+     * only this launch's bridge.json is dynamic, returned here for the caller to
+     * restore over vm-ctl. The relay reaches the bridge over vsock (abstract
+     * sockets do not cross the VM boundary). Null when the bridge cannot mount.
+     */
+    fun prepareAvfLaunch(log: (String) -> Unit): String? {
+        logger = log
+        tasks.invalidateOwners()
+        skillLifecycle.retired()
+        stopBridge()
+        sessions.beginCallerLaunch()
+        rootfs = null
+        return try {
+            tasks.clearStop()
+            skillLifecycle.launched()
+            bridge.start(withTcp = true)
+            val ep = bridge.addVsock() ?: throw IllegalStateException("vsock transport unavailable")
+            refreshScreenOff()
+            emitStatus()
+            PhoneGuest.config(ep)
+        } catch (e: Exception) {
+            log("[dsh-app] phone control: AVF setup failed (${e.message}); starting without phone tools")
+            skillLifecycle.retired()
+            stopBridge()
+            null
+        }
+    }
+
     /** After the launch command was built: [mounted] false means this runtime's template had no `dsh web` to add the overlay to. */
     fun launched(mounted: Boolean) {
         if (mounted) return
@@ -489,6 +518,11 @@ class PhoneControl private constructor(private val app: Context) : PhoneEnv, Con
     private fun checkReached() {
         if (!bridge.listening || bridge.authenticatedConnections > 0) return
         val ep = bridge.endpoint ?: return
+        // AVF: the relay dials vsock directly; the loopback fallback cannot help.
+        if (ep.vsockPort != null) {
+            logger("[dsh-app] phone control: DSH did not connect to the phone bridge over vsock")
+            return
+        }
         if (ep.tcpPort != null) {
             logger("[dsh-app] phone control: DSH did not connect to the phone bridge (unix socket nor loopback)")
             return
