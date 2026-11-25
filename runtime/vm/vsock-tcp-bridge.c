@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -85,6 +86,12 @@ static void *pump_rev(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    // A peer that closes its read side while a pump is still writing must not
+    // kill the whole bridge: write() then fails with EPIPE and the pump finishes
+    // that one connection. Observed on the Pi5 guest kernel (6.12): without this
+    // the 3080 bridge died after a few connections and every later connect got
+    // ECONNRESET (no listener). The 6.6 guest kernel did not surface it.
+    signal(SIGPIPE, SIG_IGN);
     int argi = 1;
     if (argc > 1 && strcmp(argv[1], "-c") == 0) { g_connect_mode = 1; argi = 2; }
     if (argc - argi != 2) { fprintf(stderr, "usage: %s [-c] <port-a> <port-b>\n", argv[0]); return 2; }
