@@ -16,7 +16,7 @@ import '../../runtime/runtime_state.dart';
 import '../../state/onboarding_state.dart';
 import '../common/app_sheet.dart';
 import '../common/progress_halo.dart';
-import '../engine/engine_status.dart' show humanizeRuntimeError;
+import '../engine/engine_status.dart' show setupFailureBody;
 import '../theme/app_icons.dart';
 import '../theme/theme.dart';
 import 'runtime_setup_page.dart' show showRuntimeLogSheet;
@@ -476,7 +476,7 @@ class _SetupStatusSheet extends ConsumerWidget {
         ? l10n.shellRuntimeReady
         : l10n.shellRuntimePreparing;
     final body = failed
-        ? humanizeRuntimeError(state.status.error) ?? l10n.shellRuntimeExtractFailed
+        ? setupFailureBody(state.status.error)
         : ready
         ? l10n.shellRuntimeLocalOnly
         : l10n.shellRuntimeFirstSetup;

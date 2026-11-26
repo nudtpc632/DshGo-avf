@@ -128,7 +128,12 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     init {
         phase = try {
-            if (installer.isCurrent() || avfImage.installedVersion() != null) Phase.INSTALLED else Phase.NOT_INSTALLED
+            // "Installed" means the SELECTED backend is ready, matching status()'s
+            // installedVersion. With AVF requested, a leftover PRoot rootfs does
+            // not count: the VM image must be present, else setup installs it.
+            val ready = if (avfEngine().requested) avfImage.installedVersion() == avfBundledVersion
+                else installer.isCurrent() || avfImage.installedVersion() != null
+            if (ready) Phase.INSTALLED else Phase.NOT_INSTALLED
         } catch (e: Exception) {
             error = "manifest: ${e.message}"
             Phase.ERROR
@@ -145,10 +150,17 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         // Keeps installedVersion == bundledVersion meaningful for the AVF path.
         "bundledVersion" to (if (avfEngine().requested) avfBundledVersion
             else runCatching { manifest.runtimeVersion }.getOrNull()),
-        // The version actually installed and usable: PRoot rootfs, or the AVF
-        // image when there is no rootfs (the init phase counts it the same way).
-        "installedVersion" to (runCatching { installer.installedVersion() }.getOrNull()
-            ?: runCatching { avfImage.installedVersion() }.getOrNull()),
+        // The version actually installed and usable for the SELECTED backend.
+        // Both sides of installedVersion == bundledVersion must describe the same
+        // backend: when AVF is requested, report the AVF image version, not a
+        // leftover PRoot rootfs version. Otherwise switching PRoot -> AVF on a
+        // phone that already has a rootfs reports installedVersion != bundled
+        // forever, and a transient start error during the AVF install is shown
+        // as a false "couldn't extract" setup failure (the rootfs is fine; the
+        // VM image is what is installing).
+        "installedVersion" to (if (avfEngine().requested) runCatching { avfImage.installedVersion() }.getOrNull()
+            else runCatching { installer.installedVersion() }.getOrNull()
+                ?: runCatching { avfImage.installedVersion() }.getOrNull()),
         "dshVersion" to runCatching { manifest.dshVersion }.getOrNull(),
         "nodeVersion" to runCatching { manifest.nodeVersion }.getOrNull(),
         "phase" to phase.wire,

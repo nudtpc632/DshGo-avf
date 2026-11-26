@@ -117,6 +117,19 @@ String? humanizeRuntimeError(String? raw) {
   return null;
 }
 
+/// The line under "安装未完成" on the setup pages. Only an actual unpack
+/// failure (or no error text at all) is called "解压时出错"; a start error that
+/// surfaces while the runtime version check is transitional (e.g. switching
+/// PRoot → AVF, or a start request that raced the install) is an engine start
+/// problem, not a broken archive, so it reads "启动失败" instead.
+String setupFailureBody(String? error) {
+  final humanized = humanizeRuntimeError(error);
+  if (humanized != null) return humanized;
+  final text = error?.trim() ?? '';
+  final installError = text.isEmpty || text.startsWith('install failed:');
+  return installError ? appL10n.shellRuntimeExtractFailed : appL10n.phoneEngineStartupFailed;
+}
+
 /// Compact status chip: `● 本机 · 运行中`.
 class EngineStatusChip extends StatelessWidget {
   const EngineStatusChip({super.key, required this.state, this.onTap, this.prefix});
