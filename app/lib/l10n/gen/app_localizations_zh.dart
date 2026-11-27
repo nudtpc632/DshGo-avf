@@ -12038,6 +12038,21 @@ class L10nZh extends L10n {
   String get phoneTawcUnavailable => '这个安装包不含 tawcroot，或系统低于 Android 10。';
 
   @override
+  String get phoneAvfEngine => '虚拟机后端（AVF）';
+
+  @override
+  String get phoneAvfHint => '实验功能，默认关闭，下次启动生效，和其他启动方式互斥。在系统虚拟机里运行引擎，与手机系统隔离。启动不成功会自动改回兼容启动。';
+
+  @override
+  String get phoneAvfFailedHint => '这台设备上虚拟机没有启动成功，已改用兼容启动。停止引擎后打开可再试一次。';
+
+  @override
+  String get phoneAvfUnavailable => '这个安装包不含虚拟机镜像，或这台设备不支持系统虚拟机，或尚未授予虚拟机权限（需 adb shell pm grant）。';
+
+  @override
+  String get phoneLaunchAvf => '虚拟机（AVF）';
+
+  @override
   String get phoneLaunchTawcroot => 'tawcroot';
 
   @override

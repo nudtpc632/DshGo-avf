@@ -39,7 +39,7 @@ object PhoneGuest {
     /** Recorded in the installed runtime's manifest only after the matching MCP schema is patched. */
     internal const val CALLER_PATCH = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-phone-caller.diff"
 
-    data class Endpoint(val abstractName: String?, val tcpPort: Int?, val token: String)
+    data class Endpoint(val abstractName: String?, val tcpPort: Int?, val token: String, val vsockPort: Int? = null)
 
     /**
      * The launch shell command with the phone overlay added, or null when [arg] has no anchor
@@ -120,9 +120,21 @@ export function apply(ctx) {
             "v" to 1,
             "abstract" to endpoint.abstractName,
             "tcpPort" to endpoint.tcpPort,
+            "vsockPort" to endpoint.vsockPort,
             "token" to endpoint.token,
         ),
     ) + "\n"
+
+    /**
+     * Static phone files for the read-only AVF image (built by build-vm-image.sh):
+     * the same relay/overlay the PRoot path writes at every launch, minus the
+     * per-launch bridge.json, which the App restores over vm-ctl at VM start.
+     */
+    fun vmFiles(): Map<String, String> = mapOf(
+        "opt/dsh-app/phone/relay.cjs" to RELAY_JS,
+        "opt/dsh-app/phone/diagnostics-policy.mjs" to DIAGNOSTICS_POLICY_JS,
+        "opt/dsh-app/phone/phone.patch.yml" to PATCH_YAML + DIAGNOSTICS_PRESET_YAML,
+    )
 
     /** Writes the relay, fixed diagnostic policy and overlay (world-readable, no secrets). */
     fun writeFiles(rootfs: File) {
@@ -207,6 +219,9 @@ try {
   process.exit(1)
 }
 const targets = []
+// AVF: the guest C bridge (vsock-tcp-bridge -c 13083 3083) listens on loopback
+// 13083 and tunnels to the App's vsock listener; Node has no AF_VSOCK.
+if (Number.isInteger(cfg.vsockPort) && cfg.vsockPort > 0) targets.push({ host: '127.0.0.1', port: 13083, what: 'tcp 127.0.0.1:13083 (vsock host:' + cfg.vsockPort + ')' })
 if (typeof cfg.abstract === 'string' && cfg.abstract) targets.push({ path: '\0' + cfg.abstract, what: 'unix @' + cfg.abstract })
 if (Number.isInteger(cfg.tcpPort) && cfg.tcpPort > 0) targets.push({ host: '127.0.0.1', port: cfg.tcpPort, what: 'tcp 127.0.0.1:' + cfg.tcpPort })
 
@@ -215,7 +230,8 @@ process.stdout.on('error', function (e) { process.exit(e.code === 'EPIPE' ? 0 : 
 function attempt (i) {
   if (i >= targets.length) { say('phone bridge unreachable'); process.exit(1) }
   const t = targets[i]
-  const sock = net.connect(t.port ? { host: t.host, port: t.port } : { path: t.path })
+  const opts = t.port ? { host: t.host, port: t.port } : { path: t.path }
+  const sock = net.connect(opts)
   let up = false
   const timer = setTimeout(function () { sock.destroy(new Error('connect timeout')) }, 3000)
   sock.once('connect', function () {

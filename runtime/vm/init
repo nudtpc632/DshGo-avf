@@ -1,0 +1,82 @@
+#!/usr/bin/busybox sh
+# dsh-Go AVF guest init (root= direct boot, read-only ext4 root, no initramfs).
+# Runs as PID 1 from the ro rootfs. Writable state lives on tmpfs; the host
+# persists it over the vsock control channel (vport 3081, see vm-ctl.mjs).
+BB=/usr/bin/busybox
+PORT=3080
+
+log() { echo "[vm-init] $*"; }
+
+$BB mount -t proc proc /proc
+$BB mount -t sysfs sysfs /sys
+
+# devtmpfs is not built into the AVF guest kernel: tmpfs + mknod instead.
+$BB mount -t tmpfs tmpfs /dev
+$BB mknod /dev/null c 1 3
+$BB mknod /dev/zero c 1 5
+$BB mknod /dev/urandom c 1 9
+$BB mknod /dev/console c 5 1
+$BB mknod /dev/tty c 5 0
+$BB chmod 666 /dev/null /dev/zero /dev/urandom /dev/tty
+$BB chmod 600 /dev/console
+$BB mkdir -p /dev/shm /dev/pts
+$BB mount -t tmpfs tmpfs /dev/shm
+
+$BB mount -t tmpfs tmpfs /tmp
+$BB chmod 1777 /tmp
+
+# DSH_HOME must be writable: credentials/set writes .credentials.yaml here.
+# The ro root cannot take writes, so it is a tmpfs restored/persisted by vm-ctl.
+$BB mount -t tmpfs tmpfs /root/.dsh
+$BB chmod 700 /root/.dsh
+# Phone bridge.json is per-launch; the App restores it over vm-ctl at start.
+$BB mount -t tmpfs tmpfs /var/lib/dsh-app/phone
+$BB chmod 700 /var/lib/dsh-app/phone
+
+$BB ip link set lo up
+
+log "boot: $($BB uname -sr) root ro, tmpfs /dev /tmp /root/.dsh"
+
+# Guest environment mirrors the PRoot launch template (runtime/lib/rtbuild.py
+# launch_template), minus the pnpm entries (not installed in the VM image).
+export HOME=/root USER=root LOGNAME=root SHELL=/bin/bash
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export LANG=C.UTF-8 TERM=xterm-256color TMPDIR=/tmp
+export DSH_HOME=/root/.dsh
+export XDG_DATA_DIRS=/usr/local/share:/usr/share
+export UV_USE_IO_URING=0 NARB_DISABLE_NATIVE_CACHE=1
+export NODE_OPTIONS=--dns-result-order=ipv4first
+# No virtio-net on the custom-VM path: outbound traffic goes through the guest
+# egress bridge, which tunnels over vsock to the App (vsock-tcp-bridge -c).
+export HTTP_PROXY=http://127.0.0.1:13082 HTTPS_PROXY=http://127.0.0.1:13082
+export http_proxy=http://127.0.0.1:13082 https_proxy=http://127.0.0.1:13082
+export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
+export NODE_USE_ENV_PROXY=1
+
+# HTTP over vsock: host connects vsock:3080, forwarded to dsh web on loopback.
+/opt/dsh-go/vsock-tcp-bridge $PORT $PORT &
+# Control channel: vsock:3081 -> vm-ctl.mjs on 127.0.0.1:13081.
+/opt/dsh-go/vsock-tcp-bridge 3081 13081 &
+# Egress: guest proxy on 13082 tunnels to the App over vsock:3082. Node has no
+# AF_VSOCK, so the guest side is the C bridge in connect mode.
+/opt/dsh-go/vsock-tcp-bridge -c 13082 3082 &
+# Phone bridge: guest relay on 13083 tunnels to the App over vsock:3083.
+/opt/dsh-go/vsock-tcp-bridge -c 13083 3083 &
+
+# Control service: token/status reporting and DSH_HOME persistence.
+/opt/node/bin/node /opt/dsh-go/vm-ctl.mjs &
+
+# dsh web supervisor: the token line goes to the serial console and to
+# /tmp/dsh-web.log, which vm-ctl.mjs watches and reports over vsock:3081.
+while :; do
+  log "starting dsh web on 127.0.0.1:$PORT"
+  /usr/local/bin/dsh web --patch /etc/dsh-app/dsh-web.patch.yml \
+    --patch /opt/dsh-app/phone/phone.patch.yml \
+    --host 127.0.0.1 --port $PORT --no-open > /tmp/dsh-web.log 2>&1 &
+  webpid=$!
+  echo $webpid > /tmp/dsh-web.pid
+  wait $webpid
+  rc=$?
+  log "dsh web exited rc=$rc; restarting in 2s"
+  $BB sleep 2
+done

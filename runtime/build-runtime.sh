@@ -197,8 +197,8 @@ termux_deb() {  # $1 = package, $2 = version, $3 = termux arch; echoes path
 # ubuntu-archive-keyring.gpg from the checksum-verified Ubuntu Base tarball -> Packages.xz hash
 # -> each .deb hash. The resolved set is pinned in runtime/locks/ubuntu-noble-<arch>.json
 # (re-resolve with UPDATE_DEB_LOCK=1).
-ubuntu_extra_debs() {  # $1 = ubuntu arch, $2 = verified base tarball; echoes deb paths, one per line
-  local arch="$1" base="$2" lock="$LOCKS/ubuntu-noble-$1.json" mirror
+ubuntu_extra_debs() {  # $1 = ubuntu arch, $2 = verified base tarball, $3 = lock path (optional); echoes deb paths, one per line
+  local arch="$1" base="$2" lock="${3:-$LOCKS/ubuntu-noble-$1.json}" mirror
   [[ "$arch" == amd64 ]] && mirror="$UBUNTU_ARCHIVE_AMD64" || mirror="$UBUNTU_ARCHIVE_ARM64"
   if [[ ! -f "$lock" || "${UPDATE_DEB_LOCK:-0}" == 1 ]] || \
      ! python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["want"] != sys.argv[2].split())' "$lock" "$UBUNTU_EXTRA"; then
@@ -449,7 +449,7 @@ PYEOF
   install_dsh "$npm_cpu" "$prefix"
   log "patching DSH (runtime/patches, pinned for $DSH_VERSION)"
   "${PY[@]}" patch-dsh --prefix "$prefix" --dsh-version "$DSH_VERSION" --patches "$HERE/patches" \
-    --out "$work/dsh-patches.json" >&2
+    --target android --out "$work/dsh-patches.json" >&2
   local bridge="$HERE/bridge/dsh-go-bridge"
   local bridge_version
   bridge_version="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$bridge/package.json")"
@@ -544,4 +544,7 @@ main() {
   write_index
 }
 
-main "$@"
+# build-vm-image.sh sources this file to reuse the pinned inputs and helpers.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

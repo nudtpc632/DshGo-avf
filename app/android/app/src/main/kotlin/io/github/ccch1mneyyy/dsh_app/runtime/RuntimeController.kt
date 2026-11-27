@@ -15,6 +15,9 @@ import io.github.ccch1mneyyy.dsh_app.phone.DiagnosticsTool
 import org.json.JSONArray
 import org.json.JSONObject
 import io.github.ccch1mneyyy.dsh_app.phone.skills.PhoneSkillRoute
+import io.github.ccch1mneyyy.dsh_app.runtime.avf.AvfImage
+import io.github.ccch1mneyyy.dsh_app.runtime.avf.AvfProcess
+import io.github.ccch1mneyyy.dsh_app.runtime.avf.AvfVm
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -54,7 +57,18 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     val manifest: RuntimeManifest by lazy { RuntimeManifest.load(app) }
     private val installer by lazy { RuntimeInstaller(app, manifest, ::note) }
+    private val avfImage by lazy { AvfImage(app) }
+    /** The VM image bundled in this APK flavor (assets/runtime-avf/), null when not bundled. */
+    private val avfBundledVersion: String? by lazy {
+        try {
+            JSONObject(app.assets.open("${AvfImage.ASSET_DIR}/vm-manifest.json").bufferedReader().use { it.readText() })
+                .getString("runtimeVersion")
+        } catch (_: Exception) {
+            null
+        }
+    }
     @Volatile private var process: DshProcess? = null
+    @Volatile private var avfProcess: AvfProcess? = null
     @Volatile private var lastLaunch: LaunchDiagnostics? = null
     /** The start in progress is turning PRoot's fake hard links into real files (see [L2sMigration]). */
     @Volatile private var tidyingFiles = false
@@ -114,7 +128,12 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     init {
         phase = try {
-            if (installer.isCurrent()) Phase.INSTALLED else Phase.NOT_INSTALLED
+            // "Installed" means the SELECTED backend is ready, matching status()'s
+            // installedVersion. With AVF requested, a leftover PRoot rootfs does
+            // not count: the VM image must be present, else setup installs it.
+            val ready = if (avfEngine().requested) avfImage.installedVersion() == avfBundledVersion
+                else installer.isCurrent() || avfImage.installedVersion() != null
+            if (ready) Phase.INSTALLED else Phase.NOT_INSTALLED
         } catch (e: Exception) {
             error = "manifest: ${e.message}"
             Phase.ERROR
@@ -126,8 +145,22 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     fun status(): Map<String, Any?> = mapOf(
         "abi" to (runCatching { manifest.abi }.getOrNull() ?: Build.SUPPORTED_ABIS.firstOrNull()),
-        "bundledVersion" to runCatching { manifest.runtimeVersion }.getOrNull(),
-        "installedVersion" to runCatching { installer.installedVersion() }.getOrNull(),
+        // The version this APK would install for the selected backend: the AVF
+        // image when AVF is the chosen launch, else the PRoot rootfs manifest.
+        // Keeps installedVersion == bundledVersion meaningful for the AVF path.
+        "bundledVersion" to (if (avfEngine().requested) avfBundledVersion
+            else runCatching { manifest.runtimeVersion }.getOrNull()),
+        // The version actually installed and usable for the SELECTED backend.
+        // Both sides of installedVersion == bundledVersion must describe the same
+        // backend: when AVF is requested, report the AVF image version, not a
+        // leftover PRoot rootfs version. Otherwise switching PRoot -> AVF on a
+        // phone that already has a rootfs reports installedVersion != bundled
+        // forever, and a transient start error during the AVF install is shown
+        // as a false "couldn't extract" setup failure (the rootfs is fine; the
+        // VM image is what is installing).
+        "installedVersion" to (if (avfEngine().requested) runCatching { avfImage.installedVersion() }.getOrNull()
+            else runCatching { installer.installedVersion() }.getOrNull()
+                ?: runCatching { avfImage.installedVersion() }.getOrNull()),
         "dshVersion" to runCatching { manifest.dshVersion }.getOrNull(),
         "nodeVersion" to runCatching { manifest.nodeVersion }.getOrNull(),
         "phase" to phase.wire,
@@ -153,7 +186,11 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         "tawcEngineEnabled" to tawcEngine().enabled,
         "tawcEngineAvailable" to (tawcEngineUnavailable() == null),
         "tawcEngineActive" to (process?.executionMode == "tawcroot"),
-        "currentExecutionMode" to process?.executionMode,
+        "avfEngineEnabled" to avfEngine().enabled,
+        "avfEngineAvailable" to avfEngineAvailable(),
+        "avfEngineActive" to (avfProcess != null),
+        "avfEngineFailed" to avfEngine().failed,
+        "currentExecutionMode" to (process?.executionMode ?: if (avfProcess != null) "avf" else null),
         "launchSelectedMode" to lastLaunch?.selectedMode,
         "launchSpawned" to (lastLaunch?.spawned == true),
         "launchFailureReason" to lastLaunch?.failureReason,
@@ -175,6 +212,16 @@ class RuntimeController private constructor(private val app: Context) : DshProce
     private fun tawcEngineUnavailable(): String? =
         TawcrootLaunch.unavailable(app.applicationInfo.nativeLibraryDir, android.os.Build.VERSION.SDK_INT)
 
+    private fun avfEngine() = DirectLaunch.Preference(
+        saved = prefs.getBoolean(K_AVF_ENGINE, false),
+        available = avfEngineAvailable(),
+        failedRuntime = prefs.getString(K_AVF_FAILED, null),
+        runtime = avfBundledVersion,
+    )
+
+    /** The VM tool + guest kernel on the device, the MANAGE_VIRTUAL_MACHINE grant, and a bundled image. */
+    private fun avfEngineAvailable(): Boolean = avfBundledVersion != null && AvfVm.supported(app)
+
     private fun directEngineAvailable(): Boolean = runCatching {
         manifest.raw.optJSONObject("directEngine")?.optInt("schema") == 2
     }.getOrDefault(false)
@@ -184,10 +231,10 @@ class RuntimeController private constructor(private val app: Context) : DshProce
      * Any explicit choice also forgets an earlier failed Direct launch, so turning it on tries again.
      */
     @Synchronized fun setDirectEngine(enabled: Boolean) {
-        check(process == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
+        check(process == null && avfProcess == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
         check(!enabled || directEngineAvailable()) { "this bundled runtime does not support direct launch" }
         val edit = prefs.edit().putBoolean(K_DIRECT_ENGINE, enabled).remove(K_DIRECT_FAILED)
-        if (enabled) edit.putBoolean(K_TAWC_ENGINE, false)
+        if (enabled) edit.putBoolean(K_TAWC_ENGINE, false).putBoolean(K_AVF_ENGINE, false)
         edit.apply()
         emitStatus()
     }
@@ -197,10 +244,23 @@ class RuntimeController private constructor(private val app: Context) : DshProce
      * of the two is on at a time. Turning it on forgets an earlier failed tawcroot start.
      */
     @Synchronized fun setTawcEngine(enabled: Boolean) {
-        check(process == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
+        check(process == null && avfProcess == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
         check(!enabled || tawcEngineUnavailable() == null) { "this build does not include tawcroot" }
         val edit = prefs.edit().putBoolean(K_TAWC_ENGINE, enabled).remove(K_TAWC_FAILED)
-        if (enabled) edit.putBoolean(K_DIRECT_ENGINE, false)
+        if (enabled) edit.putBoolean(K_DIRECT_ENGINE, false).putBoolean(K_AVF_ENGINE, false)
+        edit.apply()
+        emitStatus()
+    }
+
+    /**
+     * The opt-in AVF (virtual machine) backend, off by default; same rules as [setDirectEngine].
+     * At most one launch method is on. Turning it on forgets an earlier failed AVF start.
+     */
+    @Synchronized fun setAvfEngine(enabled: Boolean) {
+        check(process == null && avfProcess == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
+        check(!enabled || avfEngineAvailable()) { "this device or build does not support the AVF backend" }
+        val edit = prefs.edit().putBoolean(K_AVF_ENGINE, enabled).remove(K_AVF_FAILED)
+        if (enabled) edit.putBoolean(K_DIRECT_ENGINE, false).putBoolean(K_TAWC_ENGINE, false)
         edit.apply()
         emitStatus()
     }
@@ -229,19 +289,21 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     /** While a process is up: its mode; otherwise the mode the next start will use. */
     private fun currentModeSafe(): Boolean {
-        val active = process != null || phase == Phase.STARTING || phase == Phase.RUNNING || phase == Phase.STOPPING
+        val active = process != null || avfProcess != null || phase == Phase.STARTING || phase == Phase.RUNNING || phase == Phase.STOPPING
         return if (active) runSafe else safeState == SafeState.ON
     }
 
     /** [dropKept]: give up what a reset kept but cannot be put back (see [KeepFailed]). */
     @Synchronized fun install(dropKept: Boolean = false, onDone: (Throwable?) -> Unit) {
         if (phase == Phase.INSTALLING) return onDone(null)
+        // The AVF backend installs its own VM image; the PRoot rootfs is not needed for it.
+        if (avfEngine().requested) return installAvf(onDone)
         val current = runCatching { installer.isCurrent() }.getOrElse { return onDone(it) }
         if (current && phase != Phase.ERROR && !resetting) {
             if (phase == Phase.NOT_INSTALLED) setPhase(Phase.INSTALLED)
             return onDone(null)
         }
-        if (process != null || resetting || phase in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING)) {
+        if (process != null || avfProcess != null || resetting || phase in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING)) {
             return onDone(RuntimeUpgradeBlocked("running"))
         }
         setPhase(Phase.INSTALLING)
@@ -260,6 +322,41 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                 log("[dsh-app] runtime ready in ${(System.currentTimeMillis() - started) / 1000}s", "system")
                 error = null
                 // A new runtime may well fix what failed before.
+                strikes = 0
+                failure = null
+                prefs.edit().putInt(K_STRIKES, 0).remove(K_FAILURE).apply()
+                setPhase(Phase.INSTALLED)
+                main.post { onDone(null) }
+            } catch (e: Throwable) {
+                error = "install failed: ${e.message}"
+                log("[dsh-app] ${error}", "system")
+                setPhase(Phase.ERROR)
+                main.post { onDone(e) }
+            }
+        }
+    }
+
+    /** Copies the bundled VM image into app storage (see [AvfImage.install]); same failure surface as [install]. */
+    private fun installAvf(onDone: (Throwable?) -> Unit) {
+        val bundled = avfBundledVersion
+        if (bundled == null) return onDone(RuntimeUpgradeBlocked("manifest"))
+        if (avfImage.installedVersion() == bundled && phase != Phase.ERROR && !resetting) {
+            if (phase == Phase.NOT_INSTALLED) setPhase(Phase.INSTALLED)
+            return onDone(null)
+        }
+        if (process != null || avfProcess != null || resetting || phase in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING)) {
+            return onDone(RuntimeUpgradeBlocked("running"))
+        }
+        setPhase(Phase.INSTALLING)
+        worker.execute {
+            try {
+                log("[dsh-app] installing AVF image $bundled", "system")
+                val started = System.currentTimeMillis()
+                avfImage.install { done, total ->
+                    emit(mapOf("type" to "progress", "step" to "extract", "done" to done, "total" to total))
+                }
+                log("[dsh-app] AVF image ready in ${(System.currentTimeMillis() - started) / 1000}s", "system")
+                error = null
                 strikes = 0
                 failure = null
                 prefs.edit().putInt(K_STRIKES, 0).remove(K_FAILURE).apply()
@@ -315,7 +412,8 @@ class RuntimeController private constructor(private val app: Context) : DshProce
      * not installed or the write failed.
      */
     fun publishDiagnostics(markdown: String, manual: Boolean = false, collectedAt: Any? = null, sections: Any? = null): Map<String, Any?>? = try {
-        if (!installer.isCurrent()) null
+        // The AVF guest has no host-side rootfs to write into yet (vsock channel is a later stage).
+        if (avfProcess != null || !installer.isCurrent()) null
         else {
             val file = GuestSetup.writeDiagnostics(installer.rootfs, markdown, safe = currentModeSafe(), manual = manual)
             diagnosticsTool.published(collectedAt, sections, manual)
@@ -478,10 +576,18 @@ class RuntimeController private constructor(private val app: Context) : DshProce
     }
 
     @Synchronized internal fun startProcess() {
-        if (process != null || phase == Phase.INSTALLING || phase == Phase.STOPPING) return
+        if (process != null || avfProcess != null || phase == Phase.INSTALLING || phase == Phase.STOPPING) return
         lastLaunch = null
+        val avf = avfEngine()
+        // Safe mode is a PRoot profile repair; the VM has no plugin profile to rebuild.
+        val useAvf = avf.requested && !avf.failed && safeState != SafeState.ON
         val problem = try {
-            if (installer.isCurrent()) null else "runtime not installed"
+            when {
+                useAvf && avfImage.installedVersion() == avfBundledVersion -> null
+                useAvf -> "AVF image not installed"
+                installer.isCurrent() -> null
+                else -> "runtime not installed"
+            }
         } catch (e: Exception) {
             "runtime check failed: ${e.message}"
         }
@@ -502,6 +608,10 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         synchronized(runTail) { runTail.clear() }
         setPhase(Phase.STARTING)
         timeline.requested()
+        if (useAvf) {
+            startAvfProcess(gen)
+            return
+        }
         worker.execute {
             var launched: DshProcess? = null
             try {
@@ -607,12 +717,155 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         }
     }
 
+    /**
+     * The AVF launch: [AvfProcess] owns the VM and reports ready/exit on its own threads.
+     * The guest has no PRoot rootfs to write overlays into; phone control reaches it over
+     * vsock in a later stage, so this launch runs without phone tools for now.
+     */
+    private fun startAvfProcess(gen: Int) {
+        val diagnostics = LaunchDiagnostics().also {
+            it.selected("avf", null)
+            lastLaunch = it
+        }
+        val p = AvfProcess(app, prefs) { line -> onLog(line, "system", line) }
+        p.setListeners(
+            ready = { source, url, tok -> onAvfReady(source, gen, url, tok) },
+            exit = { source, code -> onAvfExit(source, gen, code) },
+        )
+        // The guest image bakes the phone relay/overlay; only bridge.json is per-launch.
+        PhoneControl.get(app).prepareAvfLaunch { log(it, "system") }?.let { config ->
+            val b64 = android.util.Base64.encodeToString(config.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+            p.extraRestoreFiles = mapOf("@phone/bridge.json" to b64)
+        }
+        avfProcess = p
+        try {
+            p.start()
+            diagnostics.spawned()
+            timeline.spawned()
+        } catch (e: Throwable) {
+            diagnostics.failed("startFailed")
+            avfProcess = null
+            publishStartupFailure(e.message ?: e.javaClass.simpleName, ownerReleased = true)
+            log("[dsh-app] $error", "system")
+            if (!resetting) DshService.stopSelfIfRunning(app, gen)
+        }
+    }
+
+    private fun onAvfReady(source: AvfProcess, gen: Int, url: String, tok: String) {
+        main.post {
+            synchronized(this) {
+                if (source !== avfProcess || gen != runGen || phase == Phase.STOPPING ||
+                    stopGen >= runGen || resetting || source.startupError != null) return@synchronized
+                DshService.cancelStoppedAlert(app)
+                baseUrl = url
+                token = tok
+                readyAt = SystemClock.elapsedRealtime()
+                if (failure != null) {
+                    failure = null
+                    prefs.edit().remove(K_FAILURE).apply()
+                }
+                // The VM has no plugin profile on the host disk; healthy just clears strikes.
+                bootProfile = null
+                healthyAt = System.currentTimeMillis() + SafePolicy.HEALTHY_MS
+                log("[dsh-app] DSH is listening at $url (AVF)", "system")
+                timeline.ready()?.let { log(it, "system") }
+                setPhase(Phase.RUNNING)
+                PhoneControl.get(app).onEngineReady()
+                main.postDelayed({
+                    synchronized(this) {
+                        if (gen == runGen && phase == Phase.RUNNING && avfProcess != null) onHealthy()
+                    }
+                }, SafePolicy.HEALTHY_MS)
+            }
+        }
+    }
+
+    private fun onAvfExit(source: AvfProcess, gen: Int, code: Int) {
+        main.post {
+            synchronized(this) {
+                if (source !== avfProcess || gen != runGen) return@synchronized
+                try {
+                    val startupError = source.startupError
+                    val expected = stopGen >= runGen
+                    lastLaunch?.failed(if (startupError != null) "startFailed" else "exit:$code")
+                    avfProcess = null
+                    PhoneControl.get(app).onEngineStopped()
+                    baseUrl = null
+                    token = null
+                    healthyAt = null
+                    log("[dsh-app] AVF VM exited with code $code", "system")
+                    if (readyAt == null && !expected && !resetting) {
+                        // The VM never got DSH up (boot, restore, ready deadline or HTTP check):
+                        // PRoot from now on with this image, no failure card, no strike (same
+                        // contract as tawcroot). Turning AVF on again retries.
+                        prefs.edit().putString(K_AVF_FAILED, avfBundledVersion ?: "").apply()
+                        log("[dsh-app] AVF launch failed (exit $code${startupError?.let { ": $it" } ?: ""}); starting again with compatible launch", "system")
+                        error = null
+                        setPhase(Phase.STARTING)
+                        restartNow("with compatible launch")
+                        return@synchronized
+                    }
+                    if (startupError != null && !expected && publishStartupFailure(startupError, ownerReleased = true)) {
+                        if (!resetting) DshService.postStoppedAlert(app)
+                        DshService.stopSelfIfRunning(app, runGen)
+                        return@synchronized
+                    }
+                    if (expected || resetting) {
+                        if (!resetting && phase == Phase.STOPPING) setPhase(Phase.INSTALLED)
+                        DshService.stopSelfIfRunning(app, runGen)
+                        return@synchronized
+                    }
+                    // A running VM died from outside (virtmgr kill, memory pressure): the same
+                    // bounded auto-restart as a killed PRoot process, then the failure card.
+                    val tail = synchronized(runTail) { runTail.toList() }
+                    val f = CrashClassifier.classify(code, readyAt, SystemClock.elapsedRealtime(), System.currentTimeMillis(), tail, runSafe)
+                    val now = SystemClock.elapsedRealtime()
+                    val delay = SafePolicy.autoRestartDelay(f.kind, code, readyAt?.let { now - it }, autoRestarts.toList(), now)
+                    if (delay != null && DshService.isRunning) {
+                        autoRestarts.removeAll { now - it >= 600_000L }
+                        autoRestarts.addLast(now)
+                        setPhase(Phase.STARTING)
+                        log("[dsh-app] AVF VM killed from outside; restarting in ${delay / 1000}s", "system")
+                        main.postDelayed({
+                            if (gen == runGen && stopGen < gen && phase == Phase.STARTING && avfProcess == null && DshService.isRunning) {
+                                startProcess()
+                            }
+                        }, delay)
+                        return@synchronized
+                    }
+                    recordFailure(f, tail)
+                    error = "DSH exited unexpectedly (code $code)"
+                    setPhase(Phase.ERROR)
+                    DshService.postStoppedAlert(app)
+                    DshService.stopSelfIfRunning(app, runGen)
+                } finally {
+                    runtimeLogs.flush()
+                }
+            }
+        }
+    }
+
     @Synchronized internal fun stopProcess(expectedGeneration: Int? = null): Boolean {
         // An automatic stop can arrive after a newer START service intent.
         // Check under the same monitor that advances runGen and retires the process.
         if (expectedGeneration != null && expectedGeneration != runGen) return false
         if (phase == Phase.INSTALLING) return false
         stopGen = runGen
+        val avf = avfProcess
+        if (avf != null) {
+            setPhase(Phase.STOPPING)
+            // stop() saves DSH_HOME over vsock before teardown; off the main thread.
+            worker.execute {
+                avf.stop()
+                synchronized(this) {
+                    if (avfProcess === avf) avfProcess = null
+                    baseUrl = null
+                    token = null
+                    if (!resetting && phase == Phase.STOPPING) setPhase(Phase.INSTALLED)
+                }
+            }
+            return true
+        }
         val p = process
         if (p == null) {
             if (phase == Phase.STARTING) {
@@ -676,6 +929,13 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         setPhase(Phase.STOPPING)
         worker.execute {
             try {
+                avfProcess?.let { avf ->
+                    avf.stop()
+                    check(avf.awaitExit(15_000)) { "runtime stop incomplete; retry reset after cleanup" }
+                    avfImage.reset()
+                    prefs.edit().remove("avf_dsh_home_state").apply()
+                    avfProcess = null
+                }
                 process?.let { p ->
                     p.stop()
                     check(p.awaitExit(15_000)) { "runtime stop incomplete; retry reset after cleanup" }
@@ -721,11 +981,11 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                 log("[dsh-app] reset failed: ${e.message}", "system")
                 // Still stopping while the old process hasn't exited (its exit report moves the
                 // phase on); otherwise the runtime is either still whole or gone.
-                val installed = runCatching { installer.isCurrent() }.getOrDefault(false)
+                val installed = runCatching { installer.isCurrent() }.getOrDefault(false) || avfImage.installedVersion() != null
                 synchronized(this) {
                     resetting = false
                     setPhase(when {
-                        process != null -> Phase.STOPPING
+                        process != null || avfProcess != null -> Phase.STOPPING
                         installed -> Phase.INSTALLED
                         else -> Phase.NOT_INSTALLED
                     })
@@ -1186,6 +1446,9 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         private const val K_TAWC_ENGINE = "tawcEngine"
         /** Runtime version tawcroot failed to start DSH with. */
         private const val K_TAWC_FAILED = "tawcEngineFailedRuntime"
+        private const val K_AVF_ENGINE = "avfEngine"
+        /** VM image version the AVF backend failed to start DSH with. */
+        private const val K_AVF_FAILED = "avfEngineFailedRuntime"
         private const val MAIN_FAILURE_LOG = "failure-normal.log"
         private const val LATEST_FAILURE_LOG = "failure-latest.log"
 

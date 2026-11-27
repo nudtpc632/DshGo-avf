@@ -1,0 +1,54 @@
+{
+  "arch": "arm64",
+  "want": [
+    "tzdata",
+    "ca-certificates",
+    "busybox-static"
+  ],
+  "packages": [
+    {
+      "package": "busybox-static",
+      "version": "1:1.36.1-6ubuntu3.1",
+      "architecture": "arm64",
+      "filename": "pool/main/b/busybox/busybox-static_1.36.1-6ubuntu3.1_arm64.deb",
+      "sha256": "d96535e0402c011e0ee43449799df2f4504d44b842e4f2b3a6cbc845508eaafc",
+      "size": 910700,
+      "installedSize": 1918,
+      "upgradesBase": null,
+      "neededBy": "requested"
+    },
+    {
+      "package": "ca-certificates",
+      "version": "20260816ubuntu0.24.04.2",
+      "architecture": "all",
+      "filename": "pool/main/c/ca-certificates/ca-certificates_20260816ubuntu0.24.04.2_all.deb",
+      "sha256": "f9fbacd417b515450b831032cc39d18059e9874e67525679a43c16071dabf9a0",
+      "size": 140064,
+      "installedSize": 330,
+      "upgradesBase": null,
+      "neededBy": "requested"
+    },
+    {
+      "package": "openssl",
+      "version": "3.0.13-0ubuntu3.16",
+      "architecture": "arm64",
+      "filename": "pool/main/o/openssl/openssl_3.0.13-0ubuntu3.16_arm64.deb",
+      "sha256": "07fa666e2dfe758e5c4e19ccc695a19e8a56fb512fa55bd7de89219a1e65d372",
+      "size": 985334,
+      "installedSize": 1897,
+      "upgradesBase": null,
+      "neededBy": "ca-certificates"
+    },
+    {
+      "package": "tzdata",
+      "version": "2026e-0ubuntu0.24.04.1",
+      "architecture": "all",
+      "filename": "pool/main/t/tzdata/tzdata_2026e-0ubuntu0.24.04.1_all.deb",
+      "sha256": "2f6794a7f31753fc947d9ac02ff03ea46510f34864f9d132a93d7b105e3c4447",
+      "size": 282136,
+      "installedSize": 1389,
+      "upgradesBase": null,
+      "neededBy": "requested"
+    }
+  ]
+}

@@ -427,6 +427,7 @@ class RuntimeLaunchFacts extends StatelessWidget {
       'direct' => l10n.phoneLaunchDirect,
       'proot' => l10n.phoneLaunchCompatible,
       'tawcroot' => l10n.phoneLaunchTawcroot,
+      'avf' => l10n.phoneLaunchAvf,
       _ => mode,
     };
     // One child of the card: keep SheetGroup's 2dp between its rows.

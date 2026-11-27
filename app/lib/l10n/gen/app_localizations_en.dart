@@ -12670,6 +12670,24 @@ class L10nEn extends L10n {
       'This build doesn’t include tawcroot, or the phone runs a version older than Android 10.';
 
   @override
+  String get phoneAvfEngine => 'Virtual machine backend (AVF)';
+
+  @override
+  String get phoneAvfHint =>
+      'Experimental and off by default; applies on the next start. Only one launch method can be on. Runs the engine inside a system virtual machine, isolated from the phone. If it can’t start, the app goes back to compatible launch on its own.';
+
+  @override
+  String get phoneAvfFailedHint =>
+      'The virtual machine didn’t start on this device, so compatible launch is used. Stop the engine and turn this on to try again.';
+
+  @override
+  String get phoneAvfUnavailable =>
+      'This build doesn’t include a VM image, this device doesn’t support system virtual machines, or the VM permission hasn’t been granted (adb shell pm grant).';
+
+  @override
+  String get phoneLaunchAvf => 'Virtual machine (AVF)';
+
+  @override
   String get phoneLaunchTawcroot => 'tawcroot';
 
   @override

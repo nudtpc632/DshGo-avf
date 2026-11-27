@@ -40,6 +40,15 @@
     <!-- In-app update: installs the downloaded APK through a PackageInstaller session (update/). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- AVF 后端 (runtime/avf/): createVm 需要 MANAGE_VIRTUAL_MACHINE，自定义镜像（非 Microdroid）
+         还需要 USE_CUSTOM_VIRTUAL_MACHINE。两者都是 development 级权限，安装时不自动授予，
+         需在支持 AVF 的设备上一次性执行：
+         adb shell pm grant io.github.ccch1mneyyy.dsh_app android.permission.MANAGE_VIRTUAL_MACHINE
+         adb shell pm grant io.github.ccch1mneyyy.dsh_app android.permission.USE_CUSTOM_VIRTUAL_MACHINE
+         未授予时 AVF 开关不可用，应用回退到 PRoot 启动。详见 docs/design/avf-backend.md。 -->
+    <uses-permission android:name="android.permission.MANAGE_VIRTUAL_MACHINE" tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.USE_CUSTOM_VIRTUAL_MACHINE" tools:ignore="ProtectedPermissions" />
+
     <!-- libadb-android declares no targetSdk, so the merger implies READ_PHONE_STATE ("读取手机状态");
          nothing here reads it. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" tools:node="remove" />

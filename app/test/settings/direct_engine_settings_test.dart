@@ -36,6 +36,10 @@ class _Bridge extends RuntimeBridge {
   final tawcChanges = <bool>[];
   @override
   Future<void> setTawcEngine(bool enabled) async => tawcChanges.add(enabled);
+
+  final avfChanges = <bool>[];
+  @override
+  Future<void> setAvfEngine(bool enabled) async => avfChanges.add(enabled);
 }
 
 void main() {
@@ -284,7 +288,7 @@ void main() {
   });
 
   SettingsSwitchTile tawcTile(WidgetTester tester) =>
-      tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile).last);
+      tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile).at(1));
 
   testWidgets('tawcroot switch is off by default and turns on through the bridge', (tester) async {
     final bridge = _Bridge();
@@ -292,10 +296,11 @@ void main() {
     final l10n = lookupL10n(AppLocale.zhCN);
     expect(tawcTile(tester).value, isFalse);
     expect(tawcTile(tester).subtitle, l10n.phoneTawcHint);
-    await tester.tap(find.byType(Switch).last);
+    await tester.tap(find.byType(Switch).at(1));
     await tester.pumpAndSettle();
     expect(bridge.tawcChanges, [true]);
     expect(bridge.changes, isEmpty);
+    expect(bridge.avfChanges, isEmpty);
   });
 
   testWidgets('tawcroot switch explains a build without it and a failed start', (tester) async {
@@ -314,6 +319,54 @@ void main() {
     await tester.pumpAndSettle();
     expect(tawcTile(tester).subtitle, l10n.phoneTawcFailedHint);
     expect(tawcTile(tester).onChanged, isNotNull);
+  });
+
+  SettingsSwitchTile avfTile(WidgetTester tester) =>
+      tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile).last);
+
+  testWidgets('avf switch is off by default and turns on through the bridge', (tester) async {
+    final bridge = _Bridge();
+    await show(tester, _Runtime(const RuntimeStatus(phase: RuntimePhase.installed, avfEngineAvailable: true)), bridge);
+    final l10n = lookupL10n(AppLocale.zhCN);
+    expect(avfTile(tester).value, isFalse);
+    expect(avfTile(tester).subtitle, l10n.phoneAvfHint);
+    await tester.tap(find.byType(Switch).last);
+    await tester.pumpAndSettle();
+    expect(bridge.avfChanges, [true]);
+    expect(bridge.changes, isEmpty);
+    expect(bridge.tawcChanges, isEmpty);
+  });
+
+  testWidgets('avf switch explains a build without it and a failed start', (tester) async {
+    final l10n = lookupL10n(AppLocale.zhCN);
+    final runtime = _Runtime(const RuntimeStatus(phase: RuntimePhase.installed));
+    await show(tester, runtime, _Bridge());
+    expect(avfTile(tester).subtitle, l10n.phoneAvfUnavailable);
+    expect(avfTile(tester).onChanged, isNull);
+    runtime.update(
+      const RuntimeStatus(phase: RuntimePhase.installed, avfEngineAvailable: true, avfEngineFailed: true),
+    );
+    await tester.pumpAndSettle();
+    expect(avfTile(tester).subtitle, l10n.phoneAvfFailedHint);
+    expect(avfTile(tester).onChanged, isNotNull);
+  });
+
+  testWidgets('avf switch waits for a stop while the engine runs', (tester) async {
+    await show(
+      tester,
+      _Runtime(
+        const RuntimeStatus(
+          phase: RuntimePhase.running,
+          avfEngineAvailable: true,
+          avfEngineEnabled: true,
+          currentExecutionMode: 'avf',
+        ),
+      ),
+      _Bridge(),
+    );
+    expect(avfTile(tester).value, isTrue);
+    expect(avfTile(tester).subtitle, lookupL10n(AppLocale.zhCN).phoneDirectStopFirst);
+    expect(avfTile(tester).onChanged, isNull);
   });
 
   for (final locale in AppLocale.supported) {

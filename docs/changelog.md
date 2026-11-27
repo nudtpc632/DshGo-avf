@@ -2,6 +2,16 @@
 
 每个版本先中文、后英文。发版时把对应版本的正文（不含版本标题）作为 Release 正文，见 `docs/release.md`。
 
+## 未发布 · Unreleased
+
+### 中文
+
+- **修复：AVF 引擎下自定义模型等配置重启后丢失。** AVF 虚拟机把引擎数据放在内存盘里，之前只有在 App 内优雅停止引擎时才会把数据快照到手机存储；划掉后台被系统杀、强制停止或虚拟机意外退出都不保存，重启后自定义模型渠道、设置改动就没了。现在引擎运行期间每 15 秒自动快照一次（内容没变不重写），非优雅退出后重启也能恢复。刚改完配置立刻强杀 App 仍可能丢最后 15 秒内的改动。已在两台真机（Raspberry Pi 5 / Android 17、一台 Android 16 平板）上复现旧版丢失，并验证修复后「添加模型 → 强制停止 → 重启」配置完整恢复；其中 Android 16 平板还会从外部主动杀掉虚拟机，周期快照同样覆盖这种情况。
+
+### English
+
+- **Fix: custom model providers and other settings lost after a restart on the AVF engine.** The AVF virtual machine keeps engine data on a memory disk, and previously it was only snapshotted to phone storage when the engine was stopped gracefully from inside the app; a system kill after swiping the app away, a force-stop or an unexpected VM exit saved nothing, so custom model providers and settings changes were gone after a restart. The app now snapshots automatically every 15 seconds while the engine runs (unchanged content is not rewritten), so an ungraceful exit no longer loses your configuration. Force-stopping the app within 15 seconds of a change can still lose that last change. Reproduced the loss on the old build and verified the full add-provider → force-stop → relaunch → provider-restored loop on two real devices (a Raspberry Pi 5 on Android 17 and an Android 16 tablet); the tablet also kills the VM from outside on its own, which the periodic snapshots cover as well.
+
 ## 1.1.0 · 2026-11-15
 
 ### 中文
