@@ -213,7 +213,9 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         TawcrootLaunch.unavailable(app.applicationInfo.nativeLibraryDir, android.os.Build.VERSION.SDK_INT)
 
     private fun avfEngine() = DirectLaunch.Preference(
-        saved = prefs.getBoolean(K_AVF_ENGINE, false),
+        // An AVF-only build (VM image bundled, no PRoot rootfs archive) has no
+        // other launch to fall back to: AVF is the engine, on without a choice.
+        saved = if (avfOnly) true else prefs.getBoolean(K_AVF_ENGINE, false),
         available = avfEngineAvailable(),
         failedRuntime = prefs.getString(K_AVF_FAILED, null),
         runtime = avfBundledVersion,
@@ -221,6 +223,11 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     /** The VM tool + guest kernel on the device, the MANAGE_VIRTUAL_MACHINE grant, and a bundled image. */
     private fun avfEngineAvailable(): Boolean = avfBundledVersion != null && AvfVm.supported(app)
+
+    /** This APK bundles the VM image but no PRoot rootfs archive (assets/runtime/manifest.json has no rootfs). */
+    private val avfOnly: Boolean by lazy {
+        avfBundledVersion != null && manifest.archives.isEmpty()
+    }
 
     private fun directEngineAvailable(): Boolean = runCatching {
         manifest.raw.optJSONObject("directEngine")?.optInt("schema") == 2
@@ -795,10 +802,18 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                     healthyAt = null
                     log("[dsh-app] AVF VM exited with code $code", "system")
                     if (readyAt == null && !expected && !resetting) {
-                        // The VM never got DSH up (boot, restore, ready deadline or HTTP check):
-                        // PRoot from now on with this image, no failure card, no strike (same
-                        // contract as tawcroot). Turning AVF on again retries.
+                        // The VM never got DSH up (boot, restore, ready deadline or HTTP check).
+                        // With a PRoot runtime bundled: PRoot from now on with this image, no
+                        // failure card, no strike (same contract as tawcroot); turning AVF on
+                        // again retries. An AVF-only build has nothing to fall back to: show
+                        // the start failure instead of restarting into a missing runtime.
                         prefs.edit().putString(K_AVF_FAILED, avfBundledVersion ?: "").apply()
+                        if (avfOnly) {
+                            publishStartupFailure(startupError ?: "AVF VM exited during start (code $code)", ownerReleased = true)
+                            DshService.postStoppedAlert(app)
+                            DshService.stopSelfIfRunning(app, runGen)
+                            return@synchronized
+                        }
                         log("[dsh-app] AVF launch failed (exit $code${startupError?.let { ": $it" } ?: ""}); starting again with compatible launch", "system")
                         error = null
                         setPhase(Phase.STARTING)
