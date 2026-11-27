@@ -7,6 +7,8 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -32,6 +34,7 @@ class AvfProcess(
     private val image = AvfImage(context)
     private val vm = AvfVm(image)
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "avf-start").apply { isDaemon = true } }
+    private val saver = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "avf-save").apply { isDaemon = true } }
     private val stopping = AtomicBoolean(false)
     private val generation = AtomicLong(0)
     @Volatile private var forwarder: VsockForwarder? = null
@@ -40,6 +43,8 @@ class AvfProcess(
     @Volatile private var exitListener: ExitListener? = null
     @Volatile private var baseUrl: String? = null
     @Volatile private var token: String? = null
+    @Volatile private var saveTask: ScheduledFuture<*>? = null
+    @Volatile private var lastSnapshot: String? = null
     @Volatile var startupError: String? = null
         private set
     /** Extra guest files restored at start (e.g. the phone bridge.json); not persisted. */
@@ -76,6 +81,9 @@ class AvfProcess(
         val gen = generation.incrementAndGet()
         baseUrl = null
         token = null
+        // Seed the dedup baseline from the persisted snapshot so the first
+        // periodic save after a restore is a no-op when nothing changed.
+        lastSnapshot = prefs.getString(K_STATE, null)
         executor.execute { runStart(gen) }
     }
 
@@ -88,6 +96,8 @@ class AvfProcess(
                 val code = vm.awaitExit()
                 if (!stopping.get() && gen == generation.get() && baseUrl != null) {
                     onLog("[dsh-app] AVF VM exited unexpectedly (code $code)")
+                    saveTask?.cancel(false)
+                    saveTask = null
                     cleanupForwarder()
                     baseUrl = null
                     token = null
@@ -108,11 +118,14 @@ class AvfProcess(
             baseUrl = url
             token = status.token
             onLog("[dsh-app] AVF dsh web ready at $url")
+            startPeriodicSave(gen)
             readyListener?.onReady(this, url, status.token ?: "")
         } catch (t: Throwable) {
             if (stopping.get() || gen != generation.get()) return
             startupError = t.message ?: t.javaClass.simpleName
             onLog("[dsh-app] AVF start failed: $startupError")
+            saveTask?.cancel(false)
+            saveTask = null
             runCatching { vm.stop() }
             cleanupForwarder()
             exitListener?.onExit(this, 1)
@@ -187,17 +200,39 @@ class AvfProcess(
             val files = VmCtl.save(cid)
             val obj = JSONObject()
             files.forEach { (k, v) -> obj.put(k, v) }
-            prefs.edit().putString(K_STATE, obj.toString()).apply()
+            val json = obj.toString()
+            if (json == lastSnapshot) return
+            // commit(): the caller may be racing process death (stop/force-stop);
+            // the snapshot must be on disk before the VM goes away.
+            prefs.edit().putString(K_STATE, json).commit()
+            lastSnapshot = json
             onLog("[dsh-app] saved ${files.size} DSH_HOME file(s)")
         } catch (t: Exception) {
             onLog("[dsh-app] state save skipped: ${t.message}")
         }
     }
 
+    /**
+     * DSH_HOME lives on guest tmpfs: a force-stop, system kill or VM crash loses
+     * everything not yet snapshotted, and stop() is the only other save point.
+     * Persist a snapshot periodically while running so a custom provider (or any
+     * settings change) survives an ungraceful restart. Deduped: an unchanged
+     * snapshot is not rewritten.
+     */
+    private fun startPeriodicSave(gen: Long) {
+        saveTask?.cancel(false)
+        saveTask = saver.scheduleWithFixedDelay({
+            if (stopping.get() || gen != generation.get() || !vm.isAlive) return@scheduleWithFixedDelay
+            saveState()
+        }, SAVE_INTERVAL_MS, SAVE_INTERVAL_MS, TimeUnit.MILLISECONDS)
+    }
+
     fun stop() {
         if (!vm.isAlive && forwarder == null) return
         stopping.set(true)
         generation.incrementAndGet()
+        saveTask?.cancel(false)
+        saveTask = null
         saveState()
         cleanupForwarder()
         runCatching { vm.stop() }
@@ -238,5 +273,6 @@ class AvfProcess(
         private const val K_STATE = "avf_dsh_home_state"
         private const val CID_TIMEOUT_MS = 30_000L
         private const val READY_TIMEOUT_MS = 180_000L
+        private const val SAVE_INTERVAL_MS = 15_000L
     }
 }
