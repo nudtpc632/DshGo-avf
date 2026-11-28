@@ -24,7 +24,6 @@ import '../../state/onboarding_state.dart';
 import '../../state/settings_state.dart';
 import '../../ui_config/ui_skill.dart';
 import '../../usage/usage_stats.dart';
-import '../common/usage_privacy_notice.dart';
 import '../onboarding/onboarding_flow.dart';
 import '../onboarding/setup_progress.dart';
 import '../remote/remote_screen.dart';
@@ -189,7 +188,6 @@ class _RootGateState extends ConsumerState<RootGate> {
     unawaited(_prefs.setSetupStep(SetupStep.appearance));
     _startUnpack();
     _goTo(OnboardingStep.appearance);
-    unawaited(showUsagePrivacyNotice(context, platform: ref.read(operatingSystemProvider)));
   }
 
   void _afterAppearance() {

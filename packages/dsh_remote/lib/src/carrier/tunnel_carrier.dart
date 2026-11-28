@@ -19,8 +19,9 @@ import '../state.dart';
 import '../transport/transport.dart';
 import '../util/bytes.dart';
 
-/// Endpoints this client can forward through the Host's fixed allow-list.
-/// Older Host plugins may still refuse entries added by newer versions.
+/// Fixed endpoint allow-list of the Host plugin (ds-harness-remote 0.5.17 to 0.6.0,
+/// `HARNESS_REMOTE_ALLOWLIST` + terminal endpoints). Everything else is
+/// refused by the Host; this client refuses it locally first.
 const Set<String> harnessRemoteAllowlist = {
   r'$events',
   r'$events/result',
@@ -33,8 +34,6 @@ const Set<String> harnessRemoteAllowlist = {
   'credentials/set',
   'credentials/unset',
   'directoryPicker/list',
-  DsBotRpcTransport.callEndpoint,
-  DsBotRpcTransport.feedEndpoint,
   'fileReferences/list',
   'goals/clear',
   'goals/complete',
@@ -465,13 +464,9 @@ class RemoteTunnelCarrier extends DshCarrier implements WorkspaceUploadCarrier {
     };
     _tracer?.call(DshTraceEntry('out', 'rpc', {'endpoint': endpoint, 'args': args}));
     final encoded = utf8.encode(jsonEncode(request));
-    final isDsBotCall = endpoint == DsBotRpcTransport.callEndpoint;
     Object? response;
     try {
-      // The team snapshot can be large, but reading it can also bootstrap a Bot.
-      // Transfer it from the start rather than re-dispatching it on overflow.
-      if (encoded.length > directRemoteCallBytes ||
-          (isDsBotCall && args['endpoint'] == 'state' && session.supportsTransfer)) {
+      if (encoded.length > directRemoteCallBytes) {
         response = await _callTransferred(session, endpoint, encoded, timeout);
       } else {
         try {
@@ -484,8 +479,7 @@ class RemoteTunnelCarrier extends DshCarrier implements WorkspaceUploadCarrier {
               endpoint == 'commands/execute' ||
               endpoint == 'settings/mutate' ||
               endpoint == 'settings/update' ||
-              endpoint == 'settings/replace' ||
-              isDsBotCall) {
+              endpoint == 'settings/replace') {
             rethrow;
           }
           response = await _callTransferred(session, endpoint, encoded, timeout);

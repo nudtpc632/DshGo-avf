@@ -99,7 +99,7 @@ class _WorkshopMineSliverState extends ConsumerState<WorkshopMineSliver> {
   }
 
   Future<void> _publish() async {
-    await WorkshopPublishPage.open(context);
+    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const WorkshopPublishPage()));
     // Whatever happened there, read the list again.
     if (mounted) _load(onlyFirst: false);
   }

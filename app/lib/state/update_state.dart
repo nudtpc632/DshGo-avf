@@ -632,11 +632,7 @@ class AppUpdateController extends Notifier<AppUpdateState> {
     if (!isAutoCheckDue(now: _now(), lastChecked: at(_checkedKey), lastAttempt: at(_attemptKey))) return false;
     await check();
     // Switched off while the check was in flight: keep the result, skip the offer.
-    return ref.mounted &&
-        state.autoCheck &&
-        state.checkFailure == null &&
-        state.hasUpdate &&
-        !state.isSkipped &&
+    return ref.mounted && state.autoCheck && state.hasUpdate && !state.isSkipped &&
         (state.noticeOnly ? state.noticePage != null : state.asset != null);
   }
 
@@ -655,7 +651,7 @@ class AppUpdateController extends Notifier<AppUpdateState> {
     final prefs = _prefs;
     final now = _now();
     final checker = UpdateChecker(http: _http, sources: ref.read(updateSourcesProvider), userAgent: _userAgent);
-    final result = await checker.check(preferred: prefs?.getString(_endpointKey));
+    final result = await checker.check(preferred: prefs?.getString(_endpointKey), installed: state.current);
     if (!ref.mounted) return UpdateCheckPhase.idle;
     unawaited(prefs?.setInt(_attemptKey, now.millisecondsSinceEpoch));
     switch (result) {

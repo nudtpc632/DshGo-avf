@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/l10n.dart';
-import '../../remote/remote_background.dart';
 import '../../runtime/background_net.dart';
 import '../../runtime/background_protection.dart';
 import '../../runtime/runtime_state.dart';
@@ -194,7 +193,6 @@ class _KeepRunningGuideState extends _ProtectionPageState<_KeepRunningGuide> {
             ],
           ),
         if (actual != null && actual.supported) _androidProtectionSection(actual, readFailed: protection.hasError),
-        if (ref.watch(operatingSystemProvider) == 'android') const _RemoteBackgroundSection(location: true),
         SettingsSection(
           title: l10n.pluginsStayOnline,
           children: [
@@ -396,7 +394,6 @@ class _SuspendedPageState extends _ProtectionPageState<_SuspendedPage> {
             ),
           ],
         ),
-        if (!ios) const _RemoteBackgroundSection(),
       ],
     );
   }
@@ -428,7 +425,6 @@ class _SuspendedPageState extends _ProtectionPageState<_SuspendedPage> {
             SettingsTile(title: l10n.harmonyBackgroundRemoteTitle, subtitle: l10n.harmonyBackgroundRemote),
           ],
         ),
-        if (os == 'ohos') const _RemoteBackgroundSection(),
         SettingsSection(
           title: l10n.harmonyBackgroundLong,
           children: [
@@ -454,56 +450,6 @@ class _SuspendedPageState extends _ProtectionPageState<_SuspendedPage> {
         ),
       ],
     );
-  }
-}
-
-class _RemoteBackgroundSection extends ConsumerWidget {
-  const _RemoteBackgroundSection({this.location = false});
-
-  final bool location;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final l10n = context.l10n;
-    final options = ref.watch(remoteBackgroundOptionsProvider).value;
-    return SettingsSection(
-      title: l10n.remoteBackgroundProtectionTitle,
-      children: [
-        SettingsSwitchTile(
-          key: const ValueKey('remote-background-audio'),
-          title: l10n.backgroundProtectionAudio,
-          subtitle: l10n.remoteBackgroundAudioHint,
-          value: options?.audio ?? false,
-          onChanged: options == null
-              ? null
-              : (value) => _set(context, () => ref.read(remoteBackgroundOptionsProvider.notifier).setAudio(value)),
-        ),
-        if (location)
-          SettingsSwitchTile(
-            key: const ValueKey('remote-background-location'),
-            title: l10n.backgroundProtectionLocation,
-            subtitle: l10n.remoteBackgroundLocationHint,
-            value: options?.location ?? false,
-            onChanged: options == null
-                ? null
-                : (value) => _set(context, () async {
-                    if (value && !await requestRemoteBackgroundLocation()) {
-                      if (context.mounted) showBriefNotice(context, l10n.remoteBackgroundLocationPermission);
-                      return;
-                    }
-                    if (context.mounted) await ref.read(remoteBackgroundOptionsProvider.notifier).setLocation(value);
-                  }),
-          ),
-      ],
-    );
-  }
-
-  Future<void> _set(BuildContext context, Future<void> Function() change) async {
-    try {
-      await change();
-    } catch (_) {
-      if (context.mounted) showBriefNotice(context, context.l10n.backgroundProtectionUpdateFailed);
-    }
   }
 }
 

@@ -53,7 +53,6 @@ class ChatHeader extends ConsumerStatefulWidget {
     super.key,
     required this.title,
     required this.status,
-    this.sessionStatus,
     this.detail,
     this.trailing,
     this.onOpenDrawer,
@@ -66,10 +65,7 @@ class ChatHeader extends ConsumerStatefulWidget {
   final String title;
   final HeaderStatus status;
 
-  /// Session activity or sync state, separate from the remote link status.
-  final HeaderStatus? sessionStatus;
-
-  /// What follows the status under the title when no session status is shown. Shortens first.
+  /// What follows the status under the title (a phone: the workspace). Shortens first.
   final String? detail;
 
   /// 右侧件(模型胶囊 [ModelChip])。需要传 `grouped: true` 与顶栏共享一次
@@ -248,15 +244,8 @@ class _ChatHeaderState extends ConsumerState<ChatHeader> {
                                           ),
                                         ],
                                       ),
-                                      detail: switch ((widget.sessionStatus, widget.detail)) {
-                                        (final session?, _) => _StatusLabel(
-                                          status: session,
-                                          prefix: ' · ',
-                                          style: statusStyle?.copyWith(
-                                            color: session.tone == StatusTone.warn ? dsh.warning : dsh.textTertiary,
-                                          ),
-                                        ),
-                                        (_, final detail?) => FluidTextSwap(
+                                      detail: switch (widget.detail) {
+                                        final detail? => FluidTextSwap(
                                           value: detail,
                                           child: Text(
                                             ' · $detail',
@@ -265,7 +254,7 @@ class _ChatHeaderState extends ConsumerState<ChatHeader> {
                                             style: statusStyle?.copyWith(color: dsh.textTertiary),
                                           ),
                                         ),
-                                        _ => const SizedBox.shrink(),
+                                        null => const SizedBox.shrink(),
                                       },
                                     ),
                                   ],
@@ -733,11 +722,10 @@ class _RenderStatusLine extends RenderBox
 }
 
 class _StatusLabel extends StatelessWidget {
-  const _StatusLabel({required this.status, required this.style, this.prefix = ''});
+  const _StatusLabel({required this.status, required this.style});
 
   final HeaderStatus status;
   final TextStyle? style;
-  final String prefix;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -747,7 +735,7 @@ class _StatusLabel extends StatelessWidget {
     excludeSemantics: true,
     child: FluidTextSwap(
       value: status.label,
-      child: Text('$prefix${status.label}', maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
+      child: Text(status.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
     ),
   );
 }

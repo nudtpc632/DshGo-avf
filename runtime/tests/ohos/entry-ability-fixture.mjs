@@ -9,7 +9,6 @@ export const entryAbilityImports = Object.freeze({
   '../plugins/NotifyPlugin': ['default'],
   '@ohos/flutter_ohos': ['FlutterAbility', 'FlutterEngine'],
   '../plugins/ConnectivityPlugin': ['default'],
-  '../plugins/RemoteBackgroundPlugin': ['default'],
   '../plugins/GeneratedPluginRegistrant': ['GeneratedPluginRegistrant'],
   '../runtime/RuntimePlugin': ['RuntimePlugin'],
   '../runtime/RuntimeController': ['RuntimeController'],
@@ -78,9 +77,6 @@ class EntryPluginStub {
   attach() {}
   detach() {}
   onAttachedToEngine() {}
-  onForeground() {}
-  onBackground() {}
-  stop() {}
 }
 
 export function createEntryAbilityImports(overrides = {}) {

@@ -413,7 +413,7 @@ export class BoundaryCoordinator {
   pause() {
     this.#check();
     this.#manualPaused = true; this.#admissionTarget = false;
-    return this.#pause().then(acknowledgedControlVersion => ({ ...this.status(), acknowledgedControlVersion }));
+    return this.#pause();
   }
   resume() {
     this.#check();
@@ -437,7 +437,7 @@ export class BoundaryCoordinator {
       await this.#record({ kind: 'pause', bootId: this.bootId, manualPaused });
       this.clock.pause();
       await this.#journal.flush();
-      return version;
+      return { ...this.status(), acknowledgedControlVersion: version };
     });
     this.#controlTail = work.catch(error => { this.#fault ??= error; });
     return work;
@@ -454,6 +454,7 @@ export class BoundaryCoordinator {
       if (version === this.#controlVersion) {
         this.clock.resume(); const gate = this.#gate; this.#gate = undefined; gate?.resolve();
       }
+      return this.status();
     });
     this.#controlTail = work.catch(error => { this.#fault ??= error; });
     return work;

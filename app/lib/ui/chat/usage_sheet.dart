@@ -144,11 +144,11 @@ class _RingPainter extends CustomPainter {
 }
 
 /// 用量弹层:上下文窗口、本对话的 token、DeepSeek 余额。
-Future<void> showUsageSheet(BuildContext context, {required String sessionId, ModelSelection? model, String? speed}) {
+Future<void> showUsageSheet(BuildContext context, {required String sessionId, ModelSelection? model}) {
   return showAppSheet<void>(
     context,
     isScrollControlled: true,
-    builder: (context) => UsageSheet(sessionId: sessionId, model: model, speed: speed),
+    builder: (context) => UsageSheet(sessionId: sessionId, model: model),
   );
 }
 
@@ -164,13 +164,10 @@ Future<void> showUsageSheet(BuildContext context, {required String sessionId, Mo
 ///     本对话 …          DeepSeek 余额 …
 /// ```
 class UsageSheet extends ConsumerWidget {
-  const UsageSheet({super.key, required this.sessionId, this.model, this.speed});
+  const UsageSheet({super.key, required this.sessionId, this.model});
 
   final String sessionId;
   final ModelSelection? model;
-
-  /// This conversation's decoding speed, its figure only (`117`).
-  final String? speed;
 
   static const _margin = EdgeInsets.symmetric(horizontal: SheetTitleBar.inset);
 
@@ -189,7 +186,7 @@ class UsageSheet extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             SheetTitleBar(l10n.activityUsage),
-            SessionUsageSections(usage: usage, pricing: pricing, speed: speed, sheet: true, margin: _margin),
+            SessionUsageSections(usage: usage, pricing: pricing, sheet: true, margin: _margin),
             const SizedBox(height: 16),
             if (subscription == null)
               BalanceCard(title: l10n.activityUsageBalance, margin: _margin)
@@ -344,16 +341,12 @@ class SessionUsageSections extends StatelessWidget {
     super.key,
     required this.usage,
     this.pricing,
-    this.speed,
     this.sheet = false,
     this.margin = const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
   });
 
   final SessionUsage usage;
   final TokenPricing? pricing;
-
-  /// This conversation's decoding speed, its figure only (`117`); null hides it.
-  final String? speed;
   final bool sheet;
   final EdgeInsets margin;
 
@@ -362,7 +355,7 @@ class SessionUsageSections extends StatelessWidget {
     final l10n = context.l10n;
     final sections = [
       (l10n.activityUsageContext, _ContextSection(usage: usage)),
-      (l10n.activityUsageChat, _TokenSection(usage: usage, pricing: pricing, speed: speed)),
+      (l10n.activityUsageChat, _TokenSection(usage: usage, pricing: pricing)),
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -523,11 +516,10 @@ class _Bar extends StatelessWidget {
 }
 
 class _TokenSection extends StatelessWidget {
-  const _TokenSection({required this.usage, this.pricing, this.speed});
+  const _TokenSection({required this.usage, this.pricing});
 
   final SessionUsage usage;
   final TokenPricing? pricing;
-  final String? speed;
 
   @override
   Widget build(BuildContext context) {
@@ -563,10 +555,6 @@ class _TokenSection extends StatelessWidget {
               Expanded(
                 child: _Stat(label: l10n.activityCacheHit, value: hit == null ? '—' : formatPercent(hit)),
               ),
-              if (speed case final speed?)
-                Expanded(
-                  child: _Stat(label: l10n.hubSessionTokenSpeed, value: speed),
-                ),
             ],
           ),
           const SizedBox(height: 10),
