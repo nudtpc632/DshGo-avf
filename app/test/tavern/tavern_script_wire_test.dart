@@ -299,56 +299,53 @@ void main() {
     expect(await texts(), [greeting, '一改']);
   });
 
-  test("asking the model: the engine's request as given, its events told as they come, the result as JSON", () async {
+  test("asking the model as 酒馆助手: its config read by the engine's Helper requests, the Helper value back", () async {
     final bridge = _Generating();
-    final told = <Map<String, Object?>>[];
-    final wire = TavernScriptWire(bridge, onGeneration: told.add);
+    final wire = TavernScriptWire(bridge);
     final result =
         _result(
               await _ask(wire, 'generate', {
                 'contextId': 'ctx',
-                'request': {
-                  'generationId': 'g1',
-                  'userInput': '在吗',
-                  'stream': true,
+                'config': {
+                  'generation_id': 'g1',
+                  'user_input': '在吗',
+                  'should_stream': true,
                   'overrides': {'scenario': '雨夜'},
+                  'custom_api': {'model': 'm', 'temperature': 'same_as_preset'},
                 },
               }),
             )!
             as Map<String, Object?>;
-    expect(result, {'id': 'g1', 'text': '你好', 'reasoning': null, 'finishReason': 'stop', 'hookIssues': <Object?>[]});
-    expect(bridge.asked!.userInput, '在吗');
-    expect(bridge.asked!.stream, isTrue);
-    expect(bridge.asked!.overrides.fields, {'scenario': '雨夜'});
-    expect(
-      [for (final e in told) (e['event'], e['delta'])],
-      [('started', null), ('textDelta', '你'), ('textDelta', '好')],
-    );
-    expect(told.every((e) => e['id'] == 'g1'), isTrue);
+    expect(result, {'id': 'g1', 'value': '你好', 'hookIssues': <Object?>[]});
+    final asked = bridge.asked! as TavernHelperGenerateRequest;
+    expect(asked.userInput, '在吗');
+    expect(asked.stream, isTrue);
+    expect(asked.overrides.fields, {'scenario': '雨夜'});
+    expect(asked.helperOptions.customApi, isNotNull);
 
-    // Raw: its ordered prompts as the engine reads them.
-    told.clear();
+    // Raw: its ordered prompts as ST names them.
     _result(
       await _ask(wire, 'generateRaw', {
         'contextId': 'ctx',
-        'request': {
-          'generationId': 'g2',
-          'orderedPrompts': [
-            {'kind': 'placeholder', 'placeholder': 'chatHistory'},
-            {'kind': 'literal', 'role': 'system', 'content': '只说一句'},
+        'config': {
+          'generation_id': 'g2',
+          'ordered_prompts': [
+            'chat_history',
+            {'role': 'system', 'content': '只说一句'},
           ],
         },
       }),
     );
+    expect(bridge.raw, isA<TavernHelperRawRequest>());
     expect(bridge.raw!.orderedPrompts, hasLength(2));
 
-    // A field the engine does not have is refused by it; a failure is a
-    // structured error; a stop for nothing running is false.
+    // A field in the wrong shape is refused; a model failure is a
+    // structured error.
     expect(
       _error(
         await _ask(wire, 'generate', {
           'contextId': 'ctx',
-          'request': {'tools': <Object?>[]},
+          'config': {'max_chat_history': 'some'},
         }),
       )['code'],
       isA<String>(),
@@ -358,7 +355,7 @@ void main() {
       _error(
         await _ask(wire, 'generate', {
           'contextId': 'ctx',
-          'request': {'generationId': 'g3'},
+          'config': {'generation_id': 'g3'},
         }),
       )['code'],
       'model',
@@ -445,7 +442,7 @@ void main() {
     final id =
         (_result(await _ask(wire, 'openContext', {'instanceId': 'frame'}))! as Map<String, Object?>)['id']! as String;
     final regexes = _result(await _ask(wire, 'getTavernRegexes', {'contextId': id}))! as Map<String, Object?>;
-    expect(regexes.keys, unorderedEquals(['global', 'preset', 'character']));
+    expect(regexes.keys, unorderedEquals(['global', 'preset', 'character', 'chat']));
     expect(regexes['global'], [
       {
         'id': 'r1',
@@ -524,6 +521,130 @@ void main() {
     expect(byId['stored']!['destination'], {'display': false, 'prompt': false});
     expect(byId['both']!['destination'], {'display': true, 'prompt': true});
     expect(regexes['character'], isEmpty);
+  });
+
+  test(
+    'stage 4 over the channel: a book made, read, written with its version, gone; the preset; the picture; MVU',
+    () async {
+      final card = await File('assets/tavern/sample_innkeeper.json').readAsBytes();
+      final character = await tavern.importCard(card, fileName: 'sample_innkeeper.json');
+      final chat = await tavern.createChat(character.id);
+      final id =
+          (_result(await _ask(wire, 'openContext', {'instanceId': 'frame', 'chatId': chat}))!
+                  as Map<String, Object?>)['id']!
+              as String;
+      Future<Object?> ok(String method, [Map<String, Object?> params = const {}]) async =>
+          _result(await _ask(wire, method, {'contextId': id, ...params}));
+
+      final made = await ok('createBook', {
+        'name': '旅店传闻',
+        'raw': {
+          'entries': {
+            '0': {
+              'uid': 0,
+              'key': ['酒'],
+              'comment': '酒',
+              'content': '老板娘爱喝酒',
+            },
+          },
+        },
+      }) as Map<String, Object?>;
+      final ref = made['ref']! as Map<String, Object?>;
+      expect(ref['kind'], 'standalone');
+      final directory = await ok('getBookDirectory') as Map<String, Object?>;
+      expect([
+        for (final b in (directory['books']! as List).cast<Map<String, Object?>>()) b['displayName'],
+      ], contains('旅店传闻'));
+      expect(await ok('resolveBook', {'nameOrHandle': '旅店传闻'}), ref);
+      final read = await ok('readBook', {'ref': ref}) as Map<String, Object?>;
+      final book = read['book']! as Map<String, Object?>;
+      ((book['entries']! as Map<String, Object?>)['0']! as Map<String, Object?>)['content'] = '改过了';
+      final written = await ok('replaceBook', {
+        'ref': ref,
+        'book': book,
+        'expectedVersion': read['version'],
+      }) as Map<String, Object?>;
+      final entries = (written['book']! as Map<String, Object?>)['entries']! as Map<String, Object?>;
+      expect((entries['0']! as Map<String, Object?>)['content'], '改过了');
+      // The version it was read at is gone: refused, said so.
+      final stale = _error(
+        await _ask(wire, 'replaceBook', {
+          'contextId': id,
+          'ref': ref,
+          'book': book,
+          'expectedVersion': read['version'],
+        }),
+      );
+      expect(stale['code'], 'revisionConflict');
+      expect(stale['issues'], isA<List<Object?>>());
+      await ok('deleteBook', {'ref': ref, 'expectedVersion': written['version']});
+
+      final preset = await ok('readPreset', {
+        'ref': {'kind': 'current'},
+      }) as Map<String, Object?>;
+      expect(preset['ref'], {'kind': 'current'});
+      expect(preset['raw'], isA<Map<String, Object?>>());
+
+      // The picture goes as base64; what is not base64 is refused by name.
+      final picture = await ok('readCharacterAvatar', {'characterId': character.id}) as Map<String, Object?>;
+      expect(picture['bytes'], anyOf(isNull, isA<String>()));
+      final bad = _error(
+        await _ask(wire, 'replaceCharacterAvatar', {
+          'contextId': id,
+          'characterId': character.id,
+          'bytes': 'not base64!',
+          'expectedVersion': picture['version'],
+        }),
+      );
+      expect((bad['code'], bad['fieldPath']), ('invalidArgument', 'bytes'));
+
+      final mvu = await ok('setMvuEnabled', {'enabled': true}) as Map<String, Object?>;
+      expect((mvu['chatId'], mvu['enabled']), (chat, true));
+      expect(mvu['issues'], isA<List<Object?>>());
+      final parsed = await ok('parseMvuMessage', {
+        'message': "<UpdateVariable>_.set('好感度', 0, 10);//喝了一杯</UpdateVariable>",
+        'previousData': {
+          'stat_data': {'好感度': 0},
+        },
+      }) as Map<String, Object?>;
+      expect((parsed['data']! as Map<String, Object?>)['stat_data'], containsPair('好感度', 10));
+    },
+  );
+
+  test("a script's owner crosses whole, a preset's working or inline carrier too, both ways", () async {
+    final echo = _Echo();
+    final wire = TavernScriptWire(echo);
+    const owners = [
+      {'kind': 'global', 'scriptId': 's1', 'assetId': null},
+      {'kind': 'preset', 'scriptId': 's1', 'assetId': 'p1'},
+      {
+        'kind': 'preset',
+        'scriptId': 's1',
+        'assetId': 'p1',
+        'presetCarrier': {'kind': 'working', 'chatId': 'c1', 'workingId': 'w7'},
+      },
+      {
+        'kind': 'preset',
+        'scriptId': 's1',
+        'assetId': 'p1',
+        'presetCarrier': {'kind': 'inline'},
+      },
+    ];
+    for (final owner in owners) {
+      final context = _result(await _ask(wire, 'openContext', {'instanceId': 'frame', 'script': owner}))! as Map;
+      expect(context['script'], owner);
+      final read =
+          _result(
+                await _ask(wire, 'getVariables', {
+                  'contextId': 'ctx',
+                  'target': {'scope': 'script', 'scriptOwner': owner},
+                }),
+              )!
+              as Map;
+      expect((read['target']! as Map)['scriptOwner'], owner);
+    }
+    expect(echo.owners[2].presetCarrier, const TavernScriptPresetCarrier.working(chatId: 'c1', workingId: 'w7'));
+    expect(echo.owners[3].presetCarrier, const TavernScriptPresetCarrier.inline());
   });
 
   test('a wrong request is told why, as an error, not a broken channel', () async {
@@ -653,4 +774,22 @@ class _Handle implements TavernScriptGeneration {
   final Stream<TavernScriptGenerationEvent> events;
   @override
   final Future<TavernScriptGenerationResult> result;
+}
+
+/// Hands back what it was given: the context's owner, the target's.
+class _Echo implements TavernScriptBridge {
+  final owners = <TavernScriptOwner>[];
+
+  @override
+  Future<TavernScriptContext> openContext(TavernScriptContextSpec spec) async {
+    owners.add(spec.script!);
+    return TavernScriptContext(id: 'ctx', engineEpoch: 'e', instanceId: spec.instanceId, script: spec.script);
+  }
+
+  @override
+  Future<TavernVariableSnapshot> getVariables(String contextId, TavernVariableTarget target) async =>
+      TavernVariableSnapshot(resolvedTarget: target, version: 'v', value: const {});
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

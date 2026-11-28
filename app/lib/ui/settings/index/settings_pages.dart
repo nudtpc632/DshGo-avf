@@ -19,7 +19,9 @@ import '../../phone/android_shell_page.dart';
 import '../../phone/app_rules_page.dart';
 import '../../phone/dnd_mode_page.dart';
 import '../../phone/phone_control_screen.dart';
+import '../../phone/phone_skills_page.dart';
 import '../../phone/phone_unlock_page.dart';
+import '../../phone/system_actions_page.dart';
 import '../../plugins/plugin_inventory_page.dart';
 import '../../plugins/plugins_screen.dart';
 import '../../providers/providers_page.dart';
@@ -35,6 +37,7 @@ import '../notification_settings.dart';
 import '../performance_page.dart';
 import '../personalization_page.dart';
 import '../privacy_page.dart';
+import '../linux_environment_page.dart';
 import '../reply_prefs_page.dart';
 import '../settings_screen.dart';
 import '../system_access_page.dart';
@@ -62,7 +65,10 @@ Widget settingsPage(SettingsPageId id, {String? sessionId}) => switch (id) {
   SettingsPageId.phoneAlwaysAllow => const PhoneAlwaysAllowPage(),
   SettingsPageId.phoneAndroidShell => const AndroidShellPage(),
   SettingsPageId.phoneDnd => const PhoneDndPage(),
+  SettingsPageId.phoneSkills => const PhoneSkillsPage(),
   SettingsPageId.phoneUnlocks => const PhoneUnlockPage(),
+  SettingsPageId.systemActions => const SystemActionsPage(),
+  SettingsPageId.linuxEnvironment => const LinuxEnvironmentPage(),
   SettingsPageId.engine => const EngineScreen(),
   SettingsPageId.background => const BackgroundGuidePage(),
   SettingsPageId.systemAccess => const SystemAccessPage(),

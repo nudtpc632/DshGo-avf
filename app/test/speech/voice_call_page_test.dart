@@ -12,8 +12,9 @@ import 'package:dsh_app/state/app_notes.dart';
 import 'package:dsh_app/state/voice_state.dart';
 import 'package:dsh_app/ui/speech/call/call_backdrop.dart';
 import 'package:dsh_app/ui/speech/call/call_parts.dart';
-import 'package:dsh_app/ui/speech/call/call_visuals.dart';
 import 'package:dsh_app/ui/speech/voice_call_page.dart';
+import 'package:dsh_app/state/android_features.dart' show operatingSystemProvider;
+import 'package:dsh_app/ui/speech/call/call_visuals.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
@@ -105,10 +106,23 @@ void main() {
     }
     // The caption follows her voice: nothing before it plays, all of it once played.
     expect(tester.widget<RevealText>(find.byType(RevealText)).text, isEmpty);
+    // The microphone's levels alone leave the page as it was built: the light reads them itself.
+    final status = tester.widget<CallStatus>(find.byType(CallStatus));
+    for (final level in [0.1, 0.3, 0.6]) {
+      audio.emit(MicLevel(level));
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(tester.widget<CallStatus>(find.byType(CallStatus)), same(status));
     final id = RegExp(r'^open:(\S+):call=true$').firstMatch(audio.calls.lastWhere((c) => c.startsWith('open:')))![1]!;
     audio
       ..emit(PlayEvent(id, PlayPhase.start))
       ..emit(PlayEvent(id, PlayPhase.done));
+    // However long the wait for her voice, her words come in from the first letter.
+    final words = find.descendant(of: find.byKey(const ValueKey('call-reply')), matching: find.byType(CaptionWindow));
+    for (var i = 0; i < 20 && words.evaluate().isEmpty; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(tester.widget<CaptionWindow>(words).span.toPlainText(), '北');
     for (var i = 0; i < 30; i++) {
       await tester.pump(const Duration(milliseconds: 60));
     }
@@ -124,6 +138,7 @@ void main() {
 
   testWidgets('a long question is shown whole, and 字幕 opens the call in full', (tester) async {
     const long = '我想问一下这个周末北京的天气怎么样，如果下雨的话有没有什么室内的地方可以带孩子去玩，最好离朝阳区近一点';
+    const reply = '北京晴，最高二十度。';
     final (audio, conversation) = await pumpCall(tester, said: long);
     audio.emit(const SpeechStart(over: false));
     audio.emit(Utterance(Uint8List(32044), const Duration(seconds: 5)));
@@ -133,7 +148,7 @@ void main() {
     // Whole, over several lines, not cut to one.
     expect(find.text(long, findRichText: true), findsOneWidget);
 
-    conversation.reply('北京晴，最高二十度。', done: true);
+    conversation.reply('**$reply**', done: false);
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 60));
     }
@@ -143,7 +158,23 @@ void main() {
     }
     final list = find.byKey(const ValueKey('call-transcript-list'));
     expect(find.descendant(of: list, matching: find.text(long)), findsOneWidget);
-    expect(find.descendant(of: list, matching: find.text('北京晴，最高二十度。')), findsOneWidget);
+    expect(find.descendant(of: list, matching: find.text(reply)), findsOneWidget);
+    final beforeLevels = tester.widget<ListView>(list);
+    for (final level in [0.0, 0.6, 0.0]) {
+      audio.emit(MicLevel(level));
+      await tester.pump(const Duration(milliseconds: 40));
+      expect(tester.widget<ListView>(list), same(beforeLevels));
+      expect(find.descendant(of: list, matching: find.text(reply)), findsOneWidget);
+    }
+
+    const extra = '出门记得带伞。';
+    conversation.reply('**$reply**\n[$extra](https://example.test)', done: true);
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 60));
+    }
+    expect(tester.widget<ListView>(list), isNot(same(beforeLevels)));
+    expect(find.descendant(of: list, matching: find.text(reply)), findsNothing);
+    expect(find.descendant(of: list, matching: find.text('$reply\n$extra')), findsOneWidget);
   });
 
   testWidgets('a call that fails with 字幕 open closes the call page, not just the sheet', (tester) async {
@@ -236,6 +267,15 @@ void main() {
     expect(find.text('还没开口。你们说的话会一句句记在这里。'), findsOneWidget);
   });
 
+  for (final (os, frosted) in [('android', true), ('ohos', false)]) {
+    testWidgets('on $os the keys over the moving field ${frosted ? 'are' : 'are not'} frosted', (tester) async {
+      await pumpCall(tester, extra: [operatingSystemProvider.overrideWithValue(os)]);
+      expect(find.byType(BackdropFilter), frosted ? findsWidgets : findsNothing);
+      await tester.tap(find.byKey(const ValueKey('call-hang-up')));
+      await tester.pump(const Duration(seconds: 1));
+    });
+  }
+
   testWidgets('mute and loudspeaker keys switch and say so', (tester) async {
     final (audio, _) = await pumpCall(tester);
     await tester.tap(find.byKey(const ValueKey('call-mute')));
@@ -326,6 +366,77 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
     });
   }
+
+  testWidgets('less motion: captions stay built while their reveal clock keeps up', (tester) async {
+    final reduced = ValueNotifier(true);
+    addTearDown(reduced.dispose);
+    const stillKey = ValueKey('still-caption');
+    const movingKey = ValueKey('moving-caption');
+    final text = List.filled(16, 'abcdefghij').join();
+    const style = TextStyle(fontSize: 14, color: Colors.white);
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Column(
+          children: [
+            ValueListenableBuilder<bool>(
+              valueListenable: reduced,
+              builder: (_, value, child) => MediaQuery(data: MediaQueryData(disableAnimations: value), child: child!),
+              child: RevealText(key: stillKey, text: text, style: style),
+            ),
+            MediaQuery(
+              data: const MediaQueryData(disableAnimations: false),
+              child: RevealText(key: movingKey, text: text, style: style),
+            ),
+          ],
+        ),
+      ),
+    );
+    TextSpan span(Key key) => tester
+        .widget<CaptionWindow>(find.descendant(of: find.byKey(key), matching: find.byType(CaptionWindow)))
+        .span as TextSpan;
+    await tester.pump(const Duration(milliseconds: 16));
+    final still = span(stillKey);
+    var moving = span(movingKey);
+    var movingBuilds = 0;
+    expect(still.toPlainText(), text);
+    for (var i = 0; i < 20; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(span(stillKey), same(still));
+      final next = span(movingKey);
+      if (!identical(next, moving)) movingBuilds++;
+      moving = next;
+    }
+    expect(movingBuilds, 20);
+    expect(moving.toPlainText().length, lessThan(text.length));
+    reduced.value = false;
+    await tester.pump();
+    // TextSpan equality includes every child's text and style, including the fading tail.
+    expect(span(stillKey), span(movingKey));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('an emoji fades in whole, never half of its surrogate pair', (tester) async {
+    await tester.pumpWidget(
+      const Directionality(
+        textDirection: TextDirection.ltr,
+        child: RevealText(
+          text: '甲🪴乙🪴',
+          style: TextStyle(fontSize: 14, color: Colors.white),
+        ),
+      ),
+    );
+    for (var i = 0; i < 30; i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      for (final caption in tester.widgetList<CaptionWindow>(find.byType(CaptionWindow))) {
+        caption.span.visitChildren((child) {
+          final text = (child as TextSpan).text ?? '';
+          expect(text.runes.where((r) => r >= 0xD800 && r <= 0xDFFF), isEmpty, reason: text);
+          return true;
+        });
+      }
+    }
+  });
 
   test('less motion: the colours hold still; only a voice changes the size', () {
     final scene = CallScene();

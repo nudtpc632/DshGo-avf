@@ -10,6 +10,8 @@
 //                      conversation → that conversation, on its host
 //   Quick Settings     新对话
 //   pet screenshot     新对话 with the image attached, focused and unsent
+//   companion phone    back to her room when the task was asked for there;
+//   task               otherwise the app as it was
 //   a file opened with the app that no feature claims → 新对话 with it attached
 //
 // and keeps the launcher's recent conversations current. Bridges:
@@ -22,9 +24,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:dsh_tavern/dsh_tavern.dart' show isDeepSeekExport;
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../companion/companion_state.dart' show companionSessionFilterProvider, companionSessionsProvider;
 import '../../l10n/l10n.dart';
 import '../../links/app_links.dart';
 import '../../links/launcher_entries.dart';
@@ -36,6 +41,9 @@ import '../../state/draft_store.dart';
 import '../../state/hosts_state.dart';
 import '../../state/sessions_state.dart';
 import '../common/discard_guard.dart';
+import '../companion/companion_page.dart';
+import '../companion/companion_tasks_page.dart';
+import '../tavern/tavern_deepseek_import.dart';
 import '../tavern/tavern_intake.dart';
 
 /// Draws nothing. Put it once in the home shell's stack, next to [LinkHost].
@@ -94,10 +102,31 @@ class _SystemEntryHostState extends ConsumerState<SystemEntryHost> {
         when share.skipped.isEmpty && await isTavernCardFile(File(file.path), file.name)) {
       final ui = ref.read(linkRouterProvider).context ?? (mounted ? context : null);
       if (ui != null && ui.mounted) await openTavernCardFile(ui, ref, File(file.path), file.name);
+      // HarmonyOS's inbox holds the batch until it is used: the card has been read.
+      if (share.consumption case final consumption?) unawaited(consumption.finish());
       return;
     }
-    // Read after the answer: shares arriving behind an unanswered 「放弃修改？」
-    // wait in the cache, not in memory.
+    // DeepSeek's chat export goes to 酒馆 too, to be continued there.
+    if (share.files case [final file]
+        when share.skipped.isEmpty &&
+            file.name.toLowerCase().endsWith('.zip') &&
+            await compute(isDeepSeekExport, file.path)) {
+      final ui = ref.read(linkRouterProvider).context ?? (mounted ? context : null);
+      if (ui != null && ui.mounted) await takeInDeepSeekExport(ui, ref, path: file.path);
+      if (share.consumption case final consumption?) unawaited(consumption.finish());
+      return;
+    }
+    // Android's native side keeps only a few unread shares, dropping the oldest
+    // as the next arrives, with no way to say one is still wanted: read it now.
+    final os = ref.read(operatingSystemProvider);
+    if (os != 'ohos' && os != 'ios') {
+      final request = await ComposeRequest.fromShare(share, heldBytes: _heldDraftBytes);
+      if (mounted) await _compose(request);
+      return;
+    }
+    // HarmonyOS's and iOS's inboxes hold a batch until it is used. Read after
+    // the answer: shares arriving behind an unanswered 「放弃修改？」 wait in the
+    // cache, not in memory.
     await _showChat();
     if (!mounted) return ComposeRequest.discardShare(share);
     final request = await ComposeRequest.fromShare(share, heldBytes: _heldDraftBytes);
@@ -115,6 +144,12 @@ class _SystemEntryHostState extends ConsumerState<SystemEntryHost> {
   }
 
   Future<void> _onEntry(LauncherEntry entry) async {
+    if (entry is OpenChatEntry) {
+      // A cold start may still be reading her saved sessions.
+      await ref.read(companionSessionsProvider.notifier).ready;
+      if (!mounted) return;
+      entry = entry.forCompanion(ref.read(companionSessionFilterProvider), active: ref.read(activeHostProvider));
+    }
     switch (entry) {
       case NewChatEntry(:final voice, :final text):
         // The microphone opens only for an app on screen; the shortcut's
@@ -145,6 +180,20 @@ class _SystemEntryHostState extends ConsumerState<SystemEntryHost> {
         // one from switching away on a cold start (as notification taps do).
         ref.read(activeHostProvider.notifier).select(host);
         ref.read(currentSessionProvider.notifier).select(sessionId);
+      case OpenCompanionTaskEntry(:final taskId, :final taskRev):
+        await _untilResumed();
+        if (mounted) {
+          await Navigator.of(context, rootNavigator: true).push(
+            MaterialPageRoute<void>(
+              builder: (_) => CompanionTasksPage(taskId: taskId, openedRevision: taskRev),
+            ),
+          );
+        }
+      case CompanionAssistantEntry():
+        if (mounted) await openCompanionAssistant(context, ref, entry);
+      case OpenCompanionEntry(:final room):
+        // Never _showChat: closing the room would end her turn, and she is no chat.
+        if (room && mounted) await showCompanionRoom(context, ref);
     }
   }
 

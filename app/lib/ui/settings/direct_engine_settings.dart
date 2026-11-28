@@ -7,9 +7,9 @@ import '../../runtime/runtime_state.dart';
 import '../common/brief_notice.dart';
 import 'settings_widgets.dart';
 
-/// Direct launch, tawcroot launch and the AVF virtual machine backend, all off
-/// by default and at most one on; a change applies only after a deliberate
-/// engine stop/start.
+/// Direct launch (off by default), tawcroot launch (on by default) and the AVF
+/// virtual machine backend (off by default), at most one on; a change applies
+/// only after a deliberate engine stop/start.
 class DirectEngineSettings extends ConsumerStatefulWidget {
   const DirectEngineSettings({super.key});
 

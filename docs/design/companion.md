@@ -50,11 +50,11 @@ Flutter CompanionPage
 - **回环服务**：WebView 要 `fetch` 着色器和模型文件，`file://` 做不到。手机上任何 App 都能连回环端口，所以每条路径都以每次启动随机生成的令牌开头，没有令牌只有 404。页面关闭时服务也关闭。`app/` 只有固定的几个文件，`pack/` 只读且不出目录。
 - **WebView 不拿权限**：`onPermissionRequest` 一律拒绝，页面只能导航到自己。麦克风留在 Flutter 一侧，用现有的 `VoiceInputController`。
 - **CSP**：`script-src 'self' 'wasm-unsafe-eval'`，Core 的 WASM 需要后者。模型文字不进脚本，命令都是 JSON 编码的结构化消息。
-- **一帧的顺序**（`StageModel.tick`）：恢复参数基线 → 保存 → `animate.before`（写视线、姿态、表情参数、动作、口型）→ 表情管理器 → 物理 → Pose → `animate.after`（尾巴）→ `model.update`。Framework 的 `getParameterIndex` 对不存在的参数会造一个虚拟索引，所以判断模型有没有某个参数要和 `getParameterCount` 比。
+- **一帧的顺序**（`StageModel.tick`）：恢复参数基线 → `animate.before`（写视线、姿态、表情参数、动作、口型）→ 播放中的模型自带动作（若有）→ 表情管理器 → 物理 → Pose → `animate.after`（尾巴）→ `model.update`。Framework 的 `getParameterIndex` 对不存在的参数会造一个虚拟索引，所以判断模型有没有某个参数要和 `getParameterCount` 比。
 
 ## 3. 素材包
 
-**随包带一份**（owner 2026-11-06 的决定）：把 zip 放在 `app/assets/companion/whale-girl.zip` 再打包，App 里就带着它。第一次进小屋时自动解压（走和导入一样的校验，她「游过来」的画面里完成）；用户在菜单里移除后不再自己回来，设置页的主按钮变成「接她回家」，「导入别的素材包」退到第二。模型授权 owner 已在 2026-11-08 拿到（署名见 §7），1.0.14 起正式版也带它。zip 仍被 `.gitignore` 挡在仓库外，CI 打的包没有：发版机打包前要把它放进 `app/assets/companion/`，并确认 zip 里的 `character/character.json` 和 `tooling/companion/whale-girl.character.json` 一致（署名在里面；旧 zip 是空的，直接替换这一个文件即可，运行库摘要不变），打完确认 APK 里有它。以后要不要提交进仓库另定。
+**随包带一份**（owner 2026-11-06 的决定）：把 zip 放在 `app/assets/companion/whale-girl.zip` 再打包，App 里就带着它。第一次进小屋时自动解压（走和导入一样的校验，她「游过来」的画面里完成）；用户在菜单里移除后不再自己回来，设置页的主按钮变成「接她回家」，「导入别的素材包」退到第二。模型授权 owner 已在 2026-11-08 拿到（署名见 §7），1.0.14 起正式版也带它。zip 仍被 `.gitignore` 挡在仓库外，CI 打的包没有：发版机打包前要把它放进 `app/assets/companion/`，并确认 zip 里的 `character/character.json` 和 `tooling/companion/whale-girl.character.json` 一致（署名在里面；旧 zip 是空的，直接替换这一个文件即可，运行库摘要不变），打完确认 APK 里有它。以后要不要提交进仓库另定。鸿蒙的 HAP 用的是 Actions 编出的 AOT 产物，里面没有这个 zip：打包前用 `tooling/ohos/bundle-companion-pack.py --aot <ohos-aot 产物> --pack <zip> --out <新目录>` 生成一份带它的 AOT 目录（同样换上仓库里的 character.json，并在 `AssetManifest.bin` 里登记），再把这个目录交给 `check-arkts.sh --aot`；打完确认 HAP 的 `flutter_assets/assets/companion/` 里有它。
 
 ```
 pack.zip

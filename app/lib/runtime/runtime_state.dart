@@ -7,12 +7,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../l10n/l10n.dart';
 import '../state/settings_state.dart';
 import '../state/read_list_epoch.dart';
+import 'background_protection.dart';
 import 'runtime_bridge.dart';
 
 final runtimeBridgeProvider = Provider<RuntimeBridge>((ref) => RuntimeBridge());
 
 /// [RuntimeBridge.batteryExempt]; invalidate to read it again.
 final batteryExemptProvider = FutureProvider<bool?>((ref) => ref.watch(runtimeBridgeProvider).batteryExempt());
+
+/// Re-read after native status changes and when returning from system settings.
+/// Native failures must settle the pending update, not wait for automatic retries.
+final backgroundProtectionProvider = FutureProvider.autoDispose<BackgroundProtection?>((ref) {
+  ref.watch(localRuntimeProvider.select((s) => s.status));
+  return ref.watch(runtimeBridgeProvider).backgroundProtection();
+}, retry: (_, _) => null);
 
 /// A one-off message from the runtime (e.g. "已用安全模式启动"); [seq] tells repeats apart.
 class RuntimeNotice {
@@ -21,7 +29,6 @@ class RuntimeNotice {
   final String text;
 }
 
-/// What the UI needs to know about the local runtime.
 /// What the engine reported about moving saved paths when the app's container changed
 /// (runtime/ios/storage/preload.mjs). Only ever said on iOS, and said again at every start while
 /// it's still true.
@@ -43,6 +50,7 @@ enum RelocationIssue {
   };
 }
 
+/// What the UI needs to know about the local runtime.
 class LocalRuntimeState {
   const LocalRuntimeState({
     this.status = const RuntimeStatus.unknown(),
@@ -85,6 +93,27 @@ class LocalRuntimeState {
     available: available ?? this.available,
     relocation: relocation ?? this.relocation,
   );
+}
+
+/// A restart acknowledgement is not a completed filesystem reset.
+enum RuntimeResetOutcome { completed, pendingReopen }
+
+enum RuntimeResetCommitState { notCommitted, unknown, committed }
+
+class RuntimeResetFailure implements Exception {
+  const RuntimeResetFailure(this.commitState, this.cause);
+  final RuntimeResetCommitState commitState;
+  final Object cause;
+  bool get committed => commitState == RuntimeResetCommitState.committed;
+  @override
+  String toString() => 'RuntimeResetFailure: ${commitState.name}';
+}
+
+/// A committed or uncertain request must not be treated as a rolled-back reset.
+class RuntimeResetPending extends RuntimeResetFailure {
+  const RuntimeResetPending(Object cause, {RuntimeResetCommitState commitState = RuntimeResetCommitState.committed})
+    : super(commitState, cause);
+  Object? get reopenError => committed ? cause : null;
 }
 
 class LocalRuntimeController extends Notifier<LocalRuntimeState> {
@@ -195,12 +224,46 @@ class LocalRuntimeController extends Notifier<LocalRuntimeState> {
 
   Future<void> reset() => resetKeeping(const ResetKeep());
 
-  /// Resets the runtime; [keep] comes back with the next install.
+  /// Deletes without automatically reinstalling; [keep] returns on an explicit install.
   Future<void> resetKeeping(ResetKeep keep) async {
+    await _resetRuntime(keep, reinstall: false);
+  }
+
+  /// The HarmonyOS reset entry may opt in; uninstall continues using [resetKeeping].
+  Future<RuntimeResetOutcome> resetAndReinstall(ResetKeep keep) => _resetRuntime(keep, reinstall: true);
+
+  Future<RuntimeResetOutcome> _resetRuntime(ResetKeep keep, {required bool reinstall}) async {
     final r = ref;
     ref.read(readListCredentialEpochProvider.notifier).advance();
-    await _bridge.reset(keep: keep);
+    try {
+      if (reinstall) {
+        await _bridge.resetAndReinstall(keep: keep);
+      } else {
+        await _bridge.reset(keep: keep);
+      }
+    } on PlatformException catch (error) {
+      // Other failures (including a conflicting older request) do not prove
+      // that this request's choices were durably accepted.
+      if (error.code == 'ohos_reset_commit_unknown') {
+        throw RuntimeResetPending(error, commitState: RuntimeResetCommitState.unknown);
+      }
+      if (error.code != 'ohos_reset_committed') {
+        // The OH reset handler marks every attempted journal-write failure as
+        // unknown; its other replies precede that write. Keep Android errors.
+        if (error.code.startsWith('ohos_') || error.code == 'reset_busy') {
+          throw RuntimeResetFailure(RuntimeResetCommitState.notCommitted, error);
+        }
+        rethrow;
+      }
+      try {
+        await _bridge.reopenApp();
+      } catch (reopenError) {
+        throw RuntimeResetPending(reopenError);
+      }
+      return RuntimeResetOutcome.pendingReopen;
+    }
     if (r.mounted) await _refresh();
+    return RuntimeResetOutcome.completed;
   }
 }
 

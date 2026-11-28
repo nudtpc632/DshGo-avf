@@ -9,6 +9,8 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:dsh_client/dsh_client.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +20,8 @@ import 'package:http/http.dart' as http;
 import '../state/account_state.dart';
 import '../state/connection_state.dart';
 import '../state/settings_state.dart';
+
+part 'ohos_deepseek_speech.dart';
 
 /// PCM from DeepSeek's TTS: 24 kHz, 16-bit little-endian, mono.
 const deepSeekTtsRate = 24000;
@@ -424,6 +428,9 @@ final deepSeekSpeechProvider = Provider<DeepSeekSpeechResolver>((ref) {
     final carrier = client?.carrier;
     final key = ref.read(settingsProvider).apiKey.trim();
     DeepSeekSpeech direct() => DirectDeepSeekSpeech(key, client: ref.read(deepSeekSpeechHttpProvider));
+    if (Platform.operatingSystem == 'ohos') {
+      return _resolveOhosSpeech(bridge, carrier, key, ref.read(deepSeekSpeechHttpProvider));
+    }
     if (bridge == DeepSeekSpeechRoute.account && carrier is DshHttpCarrier && !(_accountRefused && key.isNotEmpty)) {
       final account = BridgeDeepSeekSpeech(carrier.connection, bridge!);
       return key.isEmpty ? account : AccountThenKeySpeech(account, direct);
@@ -447,14 +454,15 @@ final deepSeekSpeechGapProvider = Provider<DeepSeekSpeechFailure Function()>(
 
 /// Adds a WAV header to DeepSeek's PCM, for players and tools that want a file.
 Uint8List deepSeekWav(Uint8List pcm, {int rate = deepSeekTtsRate}) {
-  final header = ByteData(44);
+  final length = pcm.length & ~1;
+  final wav = Uint8List(44 + length);
+  final header = ByteData.sublistView(wav, 0, 44);
   void ascii(int at, String s) {
     for (var i = 0; i < s.length; i++) {
       header.setUint8(at + i, s.codeUnitAt(i));
     }
   }
 
-  final length = pcm.length & ~1;
   ascii(0, 'RIFF');
   header.setUint32(4, 36 + length, Endian.little);
   ascii(8, 'WAVE');
@@ -468,5 +476,5 @@ Uint8List deepSeekWav(Uint8List pcm, {int rate = deepSeekTtsRate}) {
   header.setUint16(34, 16, Endian.little);
   ascii(36, 'data');
   header.setUint32(40, length, Endian.little);
-  return Uint8List.fromList([...header.buffer.asUint8List(), ...pcm.sublist(0, length)]);
+  return wav..setRange(44, 44 + length, pcm);
 }

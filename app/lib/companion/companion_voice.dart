@@ -8,6 +8,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
@@ -15,7 +16,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../phone/phone_channel.dart';
 import '../speech/deepseek_speech.dart';
+import '../speech/speech_audio.dart';
+import '../speech/speech_out.dart';
+import '../state/android_features.dart';
+import 'companion_agent_phone_tools.dart' show companionPhoneWindow;
 import 'companion_voice_source.dart';
 
 enum CompanionVoiceEventType {
@@ -81,7 +87,7 @@ class CompanionVoice {
   }
 
   /// Queues [text] under [id] in the phone's voice, or replaces what it is saying with [flush].
-  Future<bool> speak(String id, String text, {bool flush = false}) async {
+  Future<bool> speak(String id, String text, {bool flush = false, bool ohosCall = false}) async {
     try {
       return await _channel.invokeMethod<bool>('speak', {
             'id': id,
@@ -89,6 +95,7 @@ class CompanionVoice {
             'flush': flush,
             'pitch': pitch,
             'rate': rate,
+            if (Platform.operatingSystem == 'ohos' && ohosCall) 'call': true,
           }) ??
           false;
     } on Object {
@@ -155,7 +162,15 @@ class _Line {
 /// sentence that can't be fetched or played is read in the phone's own voice
 /// when it has one. Events carry the loudness of fetched WAV audio for her mouth.
 class CompanionSpeaker {
-  CompanionSpeaker(this._voice, this._client, this._folder, [this._deepseek]) {
+  CompanionSpeaker(
+    this._voice,
+    this._client,
+    this._folder, [
+    this._deepseek,
+    this._ohosCall,
+    this._ohosOutput,
+    this._ohos = false,
+  ]) {
     _native = _voice.events.listen(_heard);
   }
 
@@ -165,6 +180,12 @@ class CompanionSpeaker {
 
   /// Who pays for DeepSeek's voice, asked per sentence (an account may sign in or out).
   final DeepSeekSpeechResolver? _deepseek;
+  // OH's system TTS needs communication usage for call audio. Android's
+  // native payload remains unchanged; this optional route is only wired on OH.
+  final bool Function()? _ohosCall;
+  final Object? Function()? _ohosOutput;
+  // OH's ordinary companion uses system TTS; fetched files have no player.
+  final bool _ohos;
   late final StreamSubscription<CompanionVoiceEvent> _native;
   final _events = StreamController<CompanionVoiceEvent>.broadcast();
 
@@ -172,7 +193,12 @@ class CompanionSpeaker {
   bool _phoneReady = false;
   Future<void> _phoneLines = Future.value();
   int _generation = 0;
-  int _previews = 0;
+  // The room and shared voice settings use the same native player and cache.
+  static int _previews = 0;
+  // Private native receipts distinguish the parts of a single failed external line.
+  static const _fallbackPrefix = 'companion-fallback-';
+  static int _fallbackSerial = 0;
+  void Function(CompanionVoiceEvent)? _fallbackReceipt;
   bool _pumping = false;
   final _queue = Queue<_Line>();
   final _ends = <String, Completer<void>>{};
@@ -216,9 +242,15 @@ class CompanionSpeaker {
       // In order, each after the engine is up; a line it won't take ends as
       // an error, or whoever waits for its end would wait for good.
       final generation = _generation;
+      final ohosCall = _ohosCall?.call() ?? false;
+      final ohosOutput = _ohosOutput?.call();
       _phoneLines = _phoneLines.then((_) async {
         if (!_phoneReady) await warmPhone();
-        if (generation != _generation || await _voice.speak(id, text, flush: flush)) return;
+        if (generation != _generation ||
+            (_ohosOutput != null && !identical(ohosOutput, _ohosOutput())) ||
+            await _voice.speak(id, text, flush: flush, ohosCall: ohosCall)) {
+          return;
+        }
         if (!_events.isClosed) _events.add(CompanionVoiceEvent(CompanionVoiceEventType.error, id));
       });
       return;
@@ -245,26 +277,46 @@ class CompanionSpeaker {
   Future<String?> preview(CompanionVoiceSettings next, String text) async {
     settings = next;
     stop();
+    final generation = _generation;
     final id = 'preview-${++_previews}';
     if (next.source == CompanionVoiceSource.system) {
-      if (!await _voice.ready()) return 'no-phone-voice';
-      return await _voice.speak(id, text, flush: true) ? null : 'no-phone-voice';
+      final ready = await _voice.ready();
+      if (generation != _generation) return 'cancelled';
+      if (!ready) return 'no-phone-voice';
+      final accepted = await _voice.speak(id, text, flush: true);
+      if (generation != _generation) return 'cancelled';
+      return accepted ? null : 'no-phone-voice';
     }
     if (!next.configured) return 'not-set-up';
+    if (_ohos) return lastError = 'unsupported voice format';
     final client = _client();
     try {
       final audio = await fetchCompanionVoice(next, text, client, deepseek: _deepseek);
+      if (generation != _generation) return 'cancelled';
       final file = await _write(id, audio);
       _files[id] = file;
-      return await _voice.play(id, file.path) ? null : 'cannot play ${audio.ext}';
+      if (generation != _generation) return 'cancelled';
+      final accepted = await _voice.play(id, file.path);
+      if (generation != _generation) return 'cancelled';
+      return accepted ? null : 'cannot play ${audio.ext}';
     } on CompanionVoiceError catch (error) {
       return error.reason;
     } finally {
       client.close();
+      // Android has opened the descriptor and iOS has loaded the clip before
+      // play answers. A refusal or a later stop may send no terminal event.
+      _finish(id);
     }
   }
 
   Future<CompanionVoiceAudio?> _fetch(CompanionVoiceSettings settings, String text) async {
+    if (_ohos) {
+      lastError = 'unsupported voice format';
+      // Keep the existing per-line system fallback, including a first line
+      // arriving before ready's warm-up. The pump can still leave on _cut.
+      if (!_phoneReady) await warmPhone();
+      return null;
+    }
     final client = _client();
     try {
       final audio = await fetchCompanionVoice(settings, text, client, deepseek: _deepseek);
@@ -293,7 +345,14 @@ class CompanionSpeaker {
         if (line.generation != _generation) continue;
         final cut = _cut.future;
         CompanionVoiceAudio? audio;
-        await Future.any([line.audio.then((a) => audio = a), cut]);
+        // Complete with nothing: the long-lived cut keeps every race's result
+        // until the next stop, and the audio bytes shouldn't stay with it.
+        await Future.any([
+          line.audio.then<void>((a) {
+            audio = a;
+          }),
+          cut,
+        ]);
         if (line.generation != _generation) continue;
         final end = _ends[line.id] = Completer<void>();
         try {
@@ -314,6 +373,10 @@ class CompanionSpeaker {
           if (line.generation != _generation) continue;
           if (!started && _phoneReady) {
             _events.add(CompanionVoiceEvent(CompanionVoiceEventType.fallback, line.id));
+            if (line.text.length > _systemSpeechLimit) {
+              await _speakLongFallback(line);
+              continue;
+            }
             started = await _voice.speak(line.id, line.text);
           }
           if (!started) {
@@ -330,7 +393,83 @@ class CompanionSpeaker {
     }
   }
 
+  /// One paid request has already failed. Admit one short native utterance at
+  /// a time; the page and any reader keep the original ID until the last one.
+  Future<void> _speakLongFallback(_Line line) async {
+    var announced = false;
+    var offset = 0;
+    try {
+      // Use the reader's normal group size under the existing one-minute
+      // watchdog. A 3999-unit utterance can take many minutes to say.
+      for (final part in companionSystemSpeechParts(line.text, limit: SpeechChunker().target)) {
+        final nativeId = '$_fallbackPrefix${++_fallbackSerial}';
+        final end = _ends[line.id] = Completer<void>();
+        var result = CompanionVoiceEventType.error;
+        void finish(CompanionVoiceEventType type) {
+          if (end.isCompleted) return;
+          result = type;
+          end.complete();
+        }
+
+        Timer? watchdog;
+        void progress() {
+          watchdog?.cancel();
+          watchdog = Timer(const Duration(minutes: 1), () => finish(CompanionVoiceEventType.error));
+        }
+
+        _fallbackReceipt = (event) {
+          if (event.id != nativeId || end.isCompleted || line.generation != _generation) return;
+          switch (event.type) {
+            case CompanionVoiceEventType.start:
+              progress();
+              if (announced) return;
+              announced = true;
+              _events.add(CompanionVoiceEvent(event.type, line.id));
+            case CompanionVoiceEventType.range:
+              progress();
+              _events.add(
+                CompanionVoiceEvent(
+                  event.type,
+                  line.id,
+                  start: event.start == null ? null : offset + event.start!,
+                  end: event.end == null ? null : offset + event.end!,
+                ),
+              );
+            case CompanionVoiceEventType.done || CompanionVoiceEventType.stopped || CompanionVoiceEventType.error:
+              finish(event.type);
+            case CompanionVoiceEventType.fallback:
+              break;
+          }
+        };
+        progress();
+        unawaited(
+          _voice.speak(nativeId, part).then((ok) {
+            if (!ok) finish(CompanionVoiceEventType.error);
+          }),
+        );
+        await end.future;
+        watchdog?.cancel();
+        if (line.generation != _generation) {
+          if (!_events.isClosed) _events.add(CompanionVoiceEvent(CompanionVoiceEventType.stopped, line.id));
+          return;
+        }
+        if (result != CompanionVoiceEventType.done) {
+          _events.add(CompanionVoiceEvent(result, line.id));
+          return;
+        }
+        offset += part.length;
+      }
+      _events.add(CompanionVoiceEvent(CompanionVoiceEventType.done, line.id));
+    } finally {
+      _fallbackReceipt = null;
+    }
+  }
+
   void _heard(CompanionVoiceEvent event) {
+    if (event.id.startsWith(_fallbackPrefix)) {
+      _fallbackReceipt?.call(event);
+      return;
+    }
     switch (event.type) {
       case CompanionVoiceEventType.start:
         _events.add(CompanionVoiceEvent(event.type, event.id, loudness: _loudness[event.id]));
@@ -338,7 +477,6 @@ class CompanionSpeaker {
       case CompanionVoiceEventType.done || CompanionVoiceEventType.stopped || CompanionVoiceEventType.error:
         final end = _ends.remove(event.id);
         if (end != null && !end.isCompleted) end.complete();
-        if (event.id.startsWith('preview-')) _finish(event.id);
       case CompanionVoiceEventType.range || CompanionVoiceEventType.fallback:
         break;
     }
@@ -365,6 +503,9 @@ final companionSpeakerProvider = Provider<CompanionSpeaker>((ref) {
     ref.watch(companionVoiceClientProvider),
     ref.watch(companionVoiceFolderProvider),
     ref.watch(deepSeekSpeechProvider),
+    null,
+    null,
+    ref.watch(operatingSystemProvider) == 'ohos',
   );
   ref.onDispose(speaker.dispose);
   return speaker;
@@ -374,6 +515,23 @@ final companionSpeakerProvider = Provider<CompanionSpeaker>((ref) {
 /// DeepSeek's (that one streams: speech_out.dart). Its own queue: reading a
 /// reply aloud never cuts into her lines' bookkeeping.
 final speechSpeakerProvider = Provider<CompanionSpeaker>((ref) {
+  if (Platform.operatingSystem == 'ohos') {
+    late final OhosSpeechSpeaker speaker;
+    speaker = OhosSpeechSpeaker(
+      ref.watch(deepSeekSpeechProvider),
+      ref.watch(speechAudioProvider),
+      CompanionSpeaker(
+        ref.watch(companionVoiceProvider),
+        ref.watch(companionVoiceClientProvider),
+        ref.watch(companionVoiceFolderProvider),
+        null,
+        () => speaker.systemCall,
+        () => speaker.systemOutput,
+      ),
+    );
+    ref.onDispose(speaker.dispose);
+    return speaker;
+  }
   final speaker = CompanionSpeaker(
     ref.watch(companionVoiceProvider),
     ref.watch(companionVoiceClientProvider),
@@ -384,6 +542,29 @@ final speechSpeakerProvider = Provider<CompanionSpeaker>((ref) {
   return speaker;
 });
 
+// Android 9 rejects even exactly getMaxSpeechInputLength() (4000 UTF-16 units).
+const _systemSpeechLimit = 3999;
+final companionSentenceEnd = RegExp(r'[。！？!?…~～]');
+
+/// Lossless, bounded pieces for the phone's synthesizer. Keep surrogate pairs
+/// together and prefer the last sentence end inside the available space.
+Iterable<String> companionSystemSpeechParts(String text, {int limit = _systemSpeechLimit}) sync* {
+  for (var start = 0; start < text.length;) {
+    var end = text.length;
+    if (end - start > limit) {
+      end = start + limit;
+      final boundary = companionSentenceEnd.allMatches(text.substring(start, end)).lastOrNull;
+      if (boundary != null) {
+        end = start + boundary.end;
+      } else if ((text.codeUnitAt(end - 1) & 0xfc00) == 0xd800) {
+        end--;
+      }
+    }
+    yield text.substring(start, end);
+    start = end;
+  }
+}
+
 /// The sentences ready to be read aloud in [words] after [from]: up to the last
 /// sentence end, or all of it once [final_] (a reply that has finished).
 (String, int) companionSpeakable(String words, int from, {required bool final_}) {
@@ -393,4 +574,56 @@ final speechSpeakerProvider = Provider<CompanionSpeaker>((ref) {
   final end = RegExp(r'[。！？!?…~～\n]').allMatches(rest).lastOrNull?.end;
   if (end == null) return ('', from);
   return (rest.substring(0, end).trim(), from + end);
+}
+
+/// One reply's words while she works on the phone, line by line as she goes:
+/// the [line] since her last step for her bubble, and what to [say] now. Whole
+/// sentences as they come; the rest once she starts a step (what she said
+/// before it is done) or the reply is in.
+class CompanionPhoneLines {
+  int _steps = 0;
+  int _said = 0;
+  int _lineFrom = 0;
+  String _words = '';
+
+  ({String line, String say}) read(String words, {required int steps, required bool running}) {
+    final stepped = steps > _steps;
+    _steps = steps;
+    // What was read holds up to the first change. A retry can take words
+    // back, and what was said stays said; the Host's saved reply can rewrite
+    // them ("东。" saved as "西。"), and that is read again from the change.
+    final read = min(max(_said, _lineFrom), min(words.length, _words.length));
+    var same = 0;
+    while (same < read && words.codeUnitAt(same) == _words.codeUnitAt(same)) {
+      same++;
+    }
+    // Never between an emoji's two halves: "😀" rewritten as "😁" shares the first.
+    if (same > 0 && words.codeUnitAt(same - 1) & 0xFC00 == 0xD800) same--;
+    _words = words;
+    final (say, said) = companionSpeakable(words, min(_said, same), final_: !running || stepped);
+    _said = said;
+    final line = words.substring(min(_lineFrom, same)).trim();
+    if (stepped) _lineFrom = words.length;
+    return (line: line, say: say);
+  }
+}
+
+/// Each time the person stops her phone work from outside her room (the
+/// island, the pill, the notification): a task of hers seen running, now
+/// stopped by them. Her voice stops with it.
+Stream<void> companionPhoneUserStops(Stream<PhoneStatus> statuses) {
+  final running = <String>{};
+  return statuses.expand((status) {
+    var stopped = false;
+    for (final task in status.tasks) {
+      final id = task.sessionId;
+      if (id == null || companionPhoneWindow(id) == null) continue;
+      if (!task.stopped) {
+        running.add(id);
+      } else if (running.remove(id) && task.stopSource == 'USER') {
+        stopped = true;
+      }
+    }
+    return [if (stopped) null];
+  });
 }

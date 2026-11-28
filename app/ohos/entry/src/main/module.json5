@@ -6,7 +6,8 @@
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
     "deviceTypes": [
-      "phone"
+      "phone",
+      "tablet"
     ],
     "deliveryWithInstall": true,
     "installationFree": false,
@@ -20,11 +21,12 @@
         "description": "$string:EntryAbility_desc",
         "icon": "$media:layered_image",
         "label": "$string:EntryAbility_label",
-        "startWindowIcon": "$media:icon",
+        "startWindowIcon": "$media:start_icon",
         "startWindowBackground": "$color:start_window_background",
         "orientation": "auto_rotation_restricted",
         "exported": true,
         "launchType": "singleton",
+        "backgroundModes": ["audioPlayback"],
         "metadata": [
           {
             "name": "ohos.ability.shortcuts",
@@ -115,6 +117,21 @@
         ]
       }
     ],
+    "extensionAbilities": [
+      {
+        "name": "CompanionFormAbility",
+        "srcEntry": "./ets/formability/CompanionFormAbility.ets",
+        "label": "$string:companion_widget_label",
+        "description": "$string:companion_widget_description",
+        "type": "form",
+        "metadata": [
+          {
+            "name": "ohos.extension.form",
+            "resource": "$profile:companion_form"
+          }
+        ]
+      }
+    ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
@@ -123,7 +140,13 @@
         "name": "ohos.permission.GET_NETWORK_INFO"
       },
       {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
         "name": "ohos.permission.VIBRATE"
+      },
+      {
+        "name": "ohos.permission.FILE_ACCESS_PERSIST"
       },
       {
         "name": "ohos.permission.MICROPHONE",

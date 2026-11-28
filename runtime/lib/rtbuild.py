@@ -53,6 +53,9 @@ ABI = {
     "arm64-v8a": {"machine": 183, "npm_cpu": "arm64", "node": "arm64", "ubuntu": "arm64", "termux": "aarch64"},
     "x86_64": {"machine": 62, "npm_cpu": "x64", "node": "x64", "ubuntu": "amd64", "termux": "x86_64"},
 }
+# Engine ELFs that ship with DWARF (x64 ORT has none). The packaged copy is blanked by
+# blank_debug_sections; the original goes to <report dir>/debug/ for symbolication.
+DEBUG_BLANKED = {"opt/node/bin/node", "opt/dsh/node_modules/sherpa-onnx-linux-arm64/libonnxruntime.so"}
 
 
 # ---------------------------------------------------------------------------
@@ -151,13 +154,13 @@ class Elf:
         for i in range(self.shnum):
             off = self.shoff + i * self.shentsize
             if self.bits == 64:
-                name, typ, _, addr, offset, size, link, info, _, entsize = struct.unpack_from(
+                name, typ, flags, addr, offset, size, link, info, _, entsize = struct.unpack_from(
                     "<IIQQQQIIQQ", self.data, off)
             else:
-                name, typ, _, addr, offset, size, link, info, _, entsize = struct.unpack_from(
+                name, typ, flags, addr, offset, size, link, info, _, entsize = struct.unpack_from(
                     "<IIIIIIIIII", self.data, off)
-            out.append(dict(type=typ, addr=addr, offset=offset, size=size, link=link, info=info,
-                            entsize=entsize))
+            out.append(dict(name=name, type=typ, flags=flags, addr=addr, offset=offset, size=size, link=link,
+                            info=info, entsize=entsize))
         return out
 
     def dynstr_references(self):
@@ -212,6 +215,28 @@ def elf_summary(data):
     # musl's libc is plain "libc.so" (glibc: libc.so.6); Android/bionic objects never reach this audit
     info["musl"] = bool("ld-musl" in (info["interp"] or "") or any("musl" in n or n == "libc.so" for n in needed))
     return info
+
+
+def blank_debug_sections(data):
+    """Zero every .debug_* section of a 64-bit ELF and set its sh_size to 0.
+
+    Nothing moves (strip tools rewrite program headers or loaded offsets): the file
+    length, ELF and program headers, every PT_LOAD byte and all other sections stay
+    identical; the zeros compress away."""
+    elf = Elf(data)
+    sections = elf.sections()
+    names = sections[elf.shstrndx]["offset"]
+    loads = [(p["offset"], p["offset"] + p["filesz"]) for p in elf.phdrs if p["type"] == 1]
+    out = bytearray(data)
+    for i, sec in enumerate(sections):
+        if not elf.string_at(names, sec["name"]).startswith(".debug_"):
+            continue
+        start, end = sec["offset"], sec["offset"] + sec["size"]
+        if sec["flags"] & 2 or any(start < b and a < end for a, b in loads):  # SHF_ALLOC
+            raise SystemExit("debug section %d is loaded; refusing to blank it" % i)
+        out[start:end] = bytes(end - start)
+        struct.pack_into("<Q", out, elf.shoff + i * elf.shentsize + 32, 0)
+    return bytes(out)
 
 
 def cmd_hoist_candidates(args):
@@ -341,8 +366,27 @@ def apply_hunks(data, hunks, label):
     return data
 
 
+def patch_names(patches):
+    """Read the explicit application order; every .diff must occur exactly once."""
+    series = os.path.join(patches, "series")
+    with open(series, encoding="utf-8") as source:
+        names = [line.strip() for line in source if line.strip() and not line.lstrip().startswith("#")]
+    if not names or len(names) != len(set(names)):
+        sys.exit("%s: empty or duplicate patch order" % series)
+    available = {name for name in os.listdir(patches) if name.endswith(".diff")}
+    listed = set(names)
+    if listed != available:
+        sys.exit("%s: unlisted patches %s; unknown entries %s"
+                 % (series, sorted(available - listed), sorted(listed - available)))
+    return names
+
+
 def select_dsh_patches(pins, directory, target):
-    """Select an explicitly declared set; never infer a target from a patch filename."""
+    """Select an explicitly declared set; never infer a target from a patch filename.
+
+    `series` is the one application order for every diff; `targetSets` only says which
+    of them each target applies, so a target's set is applied in series order."""
+    order = patch_names(directory)
     if pins.get("schema") != 2 or not isinstance(pins.get("targetSets"), dict):
         sys.exit("pins.json schema 2 with explicit targetSets is required; register each diff for android/ohos before applying or recording")
     sets = pins["targetSets"]
@@ -356,7 +400,7 @@ def select_dsh_patches(pins, directory, target):
         if len(names) != len(set(names)):
             sys.exit("duplicate patch in targetSets." + platform)
         declared.update(names)
-    present = {name for name in os.listdir(directory) if name.endswith(".diff") and not name.startswith("._")}
+    present = set(order)
     if present != declared:
         sys.exit("patch target registration mismatch: unregistered=%s missing=%s" %
                  (sorted(present - declared), sorted(declared - present)))
@@ -364,9 +408,10 @@ def select_dsh_patches(pins, directory, target):
         sys.exit("pins.json patches must be an object")
     if set(pins["patches"]) - present:
         sys.exit("pins.json contains patch entries absent from the declared files")
-    # Preserve main's Android filename order. OH declares the complete common
-    # chain first, then its overlays, whose names may sort before newer main diffs.
-    names = patch_names(directory) if target == "android" else list(sets[target])
+    # Android is main's series exactly. OH lists the complete common chain first,
+    # then its overlays, so a later main diff never sees an OH intermediate state.
+    selected = set(sets[target])
+    names = [name for name in order if name in selected]
     if not names:
         sys.exit("no patches configured for target " + target)
     return names, sorted(present)
@@ -384,25 +429,6 @@ def dsh_patch_inputs(pins, directory, names, target, version):
     encoded = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
     return inputs, hashlib.sha256(encoded).hexdigest()
 
-def patch_names(patches):
-    """Read the explicit application order; every .diff must occur exactly once."""
-    series = os.path.join(patches, "series")
-    with open(series, encoding="utf-8") as source:
-        names = [line.strip() for line in source if line.strip() and not line.lstrip().startswith("#")]
-    if not names or len(names) != len(set(names)):
-        sys.exit("%s: empty or duplicate patch order" % series)
-    available = {name for name in os.listdir(patches) if name.endswith(".diff") and not name.startswith("._")}
-    pins_path = os.path.join(patches, "pins.json")
-    if os.path.isfile(pins_path):
-        pins = json.load(open(pins_path))
-        if pins.get("schema") == 2:
-            available = set(pins["targetSets"]["android"])
-    listed = set(names)
-    if listed != available:
-        sys.exit("%s: unlisted patches %s; unknown entries %s"
-                 % (series, sorted(available - listed), sorted(listed - available)))
-    return names
-
 
 def cmd_patch_dsh(args):
     """Apply the explicitly selected target set, refusing unpinned inputs.
@@ -412,15 +438,10 @@ def cmd_patch_dsh(args):
     hard-linked tree is never modified in place. --record applies the hunks strictly and writes the
     observed hashes for this DSH version (use after reviewing the upstream file and the patch)."""
     pins_path = os.path.join(args.patches, "pins.json")
-    pins = json.load(open(pins_path)) if os.path.isfile(pins_path) else {"schema": 1, "patches": {}}
-    if pins.get("schema") == 1 and args.target == "android":
-        # Preserve main's standalone, explicitly ordered Android patch CLI.
-        names = patch_names(args.patches)
-        all_names = names
-    else:
-        names, all_names = select_dsh_patches(pins, args.patches, args.target)
+    pins = json.load(open(pins_path)) if os.path.isfile(pins_path) else {}
+    names, all_names = select_dsh_patches(pins, args.patches, args.target)
     print("DSH patch target: %s; selected %d of %d declared patches" % (args.target, len(names), len(all_names)))
-    parsed = {name: parse_unified_diff(open(os.path.join(args.patches, name)).read()) for name in names}
+    parsed = {name: parse_unified_diff(open(os.path.join(args.patches, name), encoding="utf-8").read()) for name in names}
     # Several independently reviewed patches may touch the same file. Their
     # pins must form one ordered chain, and a fully patched tree is a valid
     # idempotent input. Never accept an arbitrary intermediate/custom hash.
@@ -458,8 +479,8 @@ def cmd_patch_dsh(args):
     selected_paths = {rel for diff in parsed.values() for rel, _ in diff}
     # The first excluded pin on a path is its original only in that target's
     # application order, which need not be lexicographic for OH overlays.
-    sets = pins.get("targetSets", {"android": names, "ohos": names})
-    excluded_names = sets["ohos"] if args.target == "android" else sorted(sets["android"])
+    other = set(pins["targetSets"]["ohos" if args.target == "android" else "android"])
+    excluded_names = [name for name in patch_names(args.patches) if name in other]
     for name in excluded_names:
         if name in names:
             continue
@@ -856,6 +877,12 @@ def base_drop(path):
     return False
 
 
+# Packages whose runtime entry points all resolve outside these directories; the .ts
+# sources only feed their own builds (docs/maintenance/engine-typescript-source-pruning-contract.md).
+TS_SOURCE_DIRS = ("node_modules/openai/src/", "node_modules/@anthropic-ai/sdk/src/",
+                  "node_modules/@js-temporal/polyfill/lib/", "node_modules/minisearch/src/")
+
+
 def dsh_drop_reason(rel, abi, prune_dev):
     parts = rel.split("/")
     if "prebuilds" in parts:
@@ -870,10 +897,27 @@ def dsh_drop_reason(rel, abi, prune_dev):
     if "node-pty/third_party/conpty" in rel:
         return "foreign-binary"
     if prune_dev:
+        if rel.startswith("node_modules/@agentclientprotocol/sdk/dist/") and rel.endswith(".test.js"):
+            return "package-tests"
+        if rel.startswith((
+                "node_modules/@mixmark-io/domino/test/",
+                "node_modules/gaxios/build/esm/test/",
+                "node_modules/gaxios/build/cjs/test/",
+                "node_modules/zod/src/v3/tests/",
+                "node_modules/zod/src/v4/classic/tests/",
+                "node_modules/zod/src/v4/core/tests/",
+                "node_modules/zod/src/v4/mini/tests/")):
+            return "package-tests"
         if "/typescript/" not in "/" + rel and low.endswith((".d.ts", ".d.mts", ".d.cts", ".tsbuildinfo")):
             return "dev-metadata"
-        if low.endswith((".js.map", ".mjs.map", ".cjs.map", ".ts.map", ".css.map")):
+        if low.endswith((".js.map", ".mjs.map", ".cjs.map", ".ts.map", ".css.map", ".d.mts.map", ".d.cts.map")):
             return "dev-metadata"
+        if rel.startswith(TS_SOURCE_DIRS) and low.endswith(".ts"):
+            return "package-typescript-source"
+        if rel.startswith("node_modules/koffi/") and low.endswith((".cc", ".h", ".hh")):
+            return "package-build-source"
+        if rel == "node_modules/@mixmark-io/domino/.yarn/plugins/@yarnpkg/plugin-version.cjs":
+            return "package-build-tool"
     return None
 
 
@@ -1600,6 +1644,14 @@ def cmd_assemble(args):
             report["warnings"].append("musl-linked ELF kept: " + p)
         if p.endswith("/spawn-helper"):
             e.mode = 0o755
+        if p in DEBUG_BLANKED:
+            original = os.path.join(os.path.dirname(args.report), "debug", runtime_info["runtimeVersion"], p)
+            os.makedirs(os.path.dirname(original), exist_ok=True)
+            with open(original, "wb") as saved:
+                saved.write(data)
+            info["originalSha256"] = hashlib.sha256(data).hexdigest()
+            data = e.data = blank_debug_sections(data)
+            info["sha256"] = hashlib.sha256(data).hexdigest()
         info["path"] = p
         info["bytes"] = len(data)
         report["elf"].append(info)
@@ -1870,11 +1922,12 @@ def main():
     p = sub.add_parser("patch-dsh")
     p.add_argument("--prefix", required=True, help="npm --prefix tree holding node_modules/@deepseek-ai/...")
     p.add_argument("--dsh-version", required=True)
+    p.add_argument("--target", choices=["android", "ohos"], required=True,
+                   help="required target patch set; no default (also required with --record)")
     p.add_argument("--patches", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "patches"))
-    p.add_argument("--target", choices=["android", "ohos"], required=True)
-    p.add_argument("--target-report")
     p.add_argument("--record", action="store_true", help="write the observed hashes as this version's pins")
     p.add_argument("--out", help="write the applied patch names (JSON list) here")
+    p.add_argument("--target-report", help="write target, selected, and excluded patch sets as JSON")
     p.set_defaults(fn=cmd_patch_dsh)
 
     p = sub.add_parser("resolve-debs")

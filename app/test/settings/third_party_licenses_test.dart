@@ -41,6 +41,8 @@ const _expected = <String, String>{
   'JetBrains Mono': 'Copyright 2020 The JetBrains Mono Project Authors',
   'jQuery': 'Copyright OpenJS Foundation and other contributors, https://openjsf.org/',
   'Lodash': 'Copyright OpenJS Foundation and other contributors <https://openjsf.org/>',
+  'Zod': 'Copyright (c) 2025 Colin McDonnell',
+  'YAML (eemeli/yaml)': 'Copyright Eemeli Aro <eemeli@gmail.com>',
   'Streaming Zipformer zh-en (sherpa-onnx)': 'csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20',
 };
 
@@ -62,6 +64,64 @@ void main() {
   tearDownAll(LicenseRegistry.reset);
 
   String textOf(String package) => entries.singleWhere((e) => e.packages.contains(package)).text;
+
+  group('on HarmonyOS', () {
+    late List<LicenseEntryWithLineBreaks> harmony;
+    const gradle = [
+      'Google ML Kit Text Recognition (Chinese)',
+      'Shizuku-API',
+      'libadb-android',
+      'spake2-android',
+      'Conscrypt',
+      'Bouncy Castle',
+      'XZ for Java',
+      'AndroidX WebKit',
+      'ONNX Runtime',
+      'Silero VAD',
+      'smart-turn',
+      'tawcroot (tawc)',
+      'flutter_webrtc',
+      'AudioSwitch',
+      'WebRTC',
+      'Streaming Zipformer zh-en (sherpa-onnx)',
+    ];
+
+    setUp(() async {
+      LicenseRegistry.reset();
+      registerThirdPartyLicenses(os: 'ohos');
+      harmony = (await LicenseRegistry.licenses.toList()).cast<LicenseEntryWithLineBreaks>();
+    });
+    tearDown(() async {
+      LicenseRegistry.reset();
+      registerThirdPartyLicenses();
+      registerFontLicenses();
+    });
+
+    test('what Gradle bundles for the APK isn\'t listed, and what the HAP carries is', () {
+      final names = {for (final entry in harmony) ...entry.packages};
+      for (final name in gradle) {
+        expect(names, isNot(contains(name)), reason: name);
+      }
+      expect(
+        names,
+        containsAll(['Node.js', 'HarmonyOS runtime packages', 'DS Bot', 'Libraries.dev', 'Phosphor Icons']),
+      );
+    });
+
+    test('Node says whose it is and its terms; each package once', () {
+      final node = harmony.singleWhere((e) => e.packages.contains('Node.js')).text;
+      expect(node, contains('Copyright Node.js contributors'));
+      expect(node, contains(_mit));
+      final names = [for (final entry in harmony) ...entry.packages];
+      expect(names.toSet(), hasLength(names.length));
+    });
+
+    test('the packages\' texts it points at are in the source', () {
+      final runtime = harmony.singleWhere((e) => e.packages.contains('HarmonyOS runtime packages')).text;
+      expect(runtime, contains('runtime/ohos/licenses/texts'));
+      expect(Directory('../runtime/ohos/licenses/texts').existsSync(), isTrue);
+    });
+  });
 
   test('WebRTC entry exposes the complete upstream asset without truncation', () {
     final file = File('assets/licenses/webrtc-150.7871.04.md');
@@ -158,9 +218,28 @@ void main() {
         'f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc',
         'a9705dfc47c0763380d851ab1801be6f76019f6b67e40e9b873f8b4a0603f7a9',
       ),
+      (
+        'Zod',
+        'assets/licenses/zod-4.6.7-LICENSE.txt',
+        'assets/tavern/zod-4.6.7.min.js',
+        '3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8',
+        '3320c08ae7b97e5a977aac7ea438f9cb1238020e3a8b3bc7cfde2d1965a4e38a',
+      ),
+      (
+        'YAML (eemeli/yaml)',
+        'assets/licenses/yaml-2.9.1-LICENSE.txt',
+        'assets/tavern/yaml-2.9.1.min.js',
+        '5bba27375d93e9119f76c1015f7672cf9ad5f70952296e0842fb2243d6376869',
+        'ccdebd91f1f455d059da218b7f794aaa794705781740e67e94cd0dba0419df29',
+      ),
     ]) {
       expect(textOf(package), File(license).readAsStringSync(), reason: package);
-      expect(textOf(package), contains(_mit), reason: package);
+      // YAML's is ISC, the others MIT.
+      expect(
+        textOf(package),
+        contains(package.startsWith('YAML') ? 'Permission to use, copy, modify' : _mit),
+        reason: package,
+      );
       expect(sha256.convert(File(license).readAsBytesSync()).toString(), licenseSha, reason: license);
       expect(sha256.convert(File(build).readAsBytesSync()).toString(), buildSha, reason: build);
     }
