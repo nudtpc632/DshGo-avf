@@ -42,7 +42,9 @@ data class RuntimeManifest(
                 catch (_: Exception) { throw RuntimeUpgradeBlocked("manifest") }
             if (schema == 1 && json.has("layers")) throw RuntimeUpgradeBlocked("manifest")
             val archives = when (schema) {
-                1 -> listOf(RuntimeArchive(json.getString("rootfs"), json.optLong("rootfsBytes", -1L),
+                // No rootfs archive: an AVF-only build. The VM image is the runtime;
+                // PRoot install/launch paths report "runtime not installed" if ever taken.
+                1 -> if (!json.has("rootfs")) emptyList() else listOf(RuntimeArchive(json.getString("rootfs"), json.optLong("rootfsBytes", -1L),
                     json.optString("rootfsSha256").ifEmpty { null }, json.optLong("uncompressedBytes", -1L)))
                 2 -> try {
                     require(!json.has("rootfs") && !json.has("rootfsSha256") && !json.has("rootfsFormat"))

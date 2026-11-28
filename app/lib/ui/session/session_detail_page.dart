@@ -21,6 +21,7 @@ import '../chat/chat_header.dart';
 import '../chat/diff_page.dart';
 import '../chat/run_info.dart';
 import '../chat/step_detail_page.dart';
+import '../chat/tool_view.dart' show PhoneResultText;
 import '../chat/trajectory_sheet.dart';
 import '../chat/turn_summary.dart';
 import '../chat/usage_sheet.dart';
@@ -533,7 +534,9 @@ class SessionHero extends ConsumerWidget {
     final running = turns.where((t) => t.running).lastOrNull;
     final finished = turns.fold(Duration.zero, (sum, t) => sum + (t.duration ?? Duration.zero));
     final steps = turns.fold(0, (sum, t) => sum + t.steps);
-    final files = fileChangesOf(tools).length;
+    final files = sessionChangesOf(tools).length;
+    // Dispatches count once each: a subagent that also received follow-ups is still one.
+    final subagents = tools.where((tool) => tool.name == 'subagent' || tool.name == 'subagent_fork').length;
     final subtitle = turns.isEmpty
         ? l10n.hubSessionNoTurns
         : running == null
@@ -545,6 +548,7 @@ class SessionHero extends ConsumerWidget {
         (formatClock(total), l10n.hubSessionElapsed),
         ('$steps', l10n.hubSessionSteps),
         ('$files', l10n.hubSessionChangedFiles),
+        if (subagents > 0) ('$subagents', l10n.hubTabSubagents),
       ];
       if (title case final title?) {
         return PageHero(
@@ -869,6 +873,7 @@ class _TurnCardState extends State<_TurnCard> {
     final facts = [
       if (trace.steps > 0) l10n.hubSessionStepCount(trace.steps),
       if (!trace.usage.isEmpty) '${formatTokens(trace.usage.total)} tokens',
+      ?turnSpeedLabel(trace),
       if (trace.waitTime > Duration.zero) l10n.hubSessionWaitTime(formatSpan(trace.waitTime)),
       ?turnCostLabel(trace),
     ];
@@ -1011,7 +1016,7 @@ class _ChangesTabState extends ConsumerState<ChangesTab> {
     final inputs = (tools, turns);
     if (identical(_inputs, inputs) || _inputs == inputs) return;
     _inputs = inputs;
-    _files = fileChangesOf(tools);
+    _files = sessionChangesOf(tools);
     final turnOf = <String, int>{
       for (final trace in turns)
         for (final span in trace.spans)
@@ -1264,10 +1269,17 @@ class ContextTab extends ConsumerWidget {
         if (!trace.usage.isEmpty) trace,
     ].take(12).toList();
     final peak = recent.fold(0, (m, t) => t.usage.total > m ? t.usage.total : m);
+    final speed = speedFigure(tracesTokensPerSecond(turns));
+    // A turn's own line of detail: how long it took, how fast it decoded.
+    String? metaOf(TurnTrace trace) {
+      final parts = [if (trace.duration case final duration?) formatSpan(duration), ?turnSpeedLabel(trace)];
+      return parts.isEmpty ? null : parts.join(' · ');
+    }
+
     return ListView(
       padding: _listPadding(context),
       children: [
-        SessionUsageSections(usage: usage, pricing: pricing),
+        SessionUsageSections(usage: usage, pricing: pricing, speed: speed),
         if (recent.isNotEmpty)
           ListPageCard(
             title: l10n.hubSessionTurnUsage,
@@ -1277,45 +1289,58 @@ class ContextTab extends ConsumerWidget {
               for (final trace in recent)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 9, 16, 9),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SizedBox(
-                        width: 52,
-                        child: Text(
-                          l10n.hubSessionTurn(trace.turn),
-                          style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: dsh.textTertiary)),
-                        ),
+                      Row(
+                        children: [
+                          SizedBox(
+                            width: 52,
+                            child: Text(
+                              l10n.hubSessionTurn(trace.turn),
+                              style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: dsh.textTertiary)),
+                            ),
+                          ),
+                          Expanded(
+                            child: TimelineBar(
+                              start: Duration.zero,
+                              duration: Duration(milliseconds: trace.usage.total),
+                              total: Duration(milliseconds: peak <= 0 ? 1 : peak),
+                              color: theme.colorScheme.primary.withValues(alpha: 0.75),
+                              height: 6,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            width: 52,
+                            child: Text(
+                              formatTokens(trace.usage.total),
+                              textAlign: TextAlign.right,
+                              style: AppType.tabular(
+                                theme.textTheme.bodySmall!.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 64,
+                            child: Text(
+                              trace.usage.cacheHitRate == null
+                                  ? ''
+                                  : l10n.hubSessionCacheHit(formatPercent(trace.usage.cacheHitRate!)),
+                              textAlign: TextAlign.right,
+                              style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: dsh.textTertiary)),
+                            ),
+                          ),
+                        ],
                       ),
-                      Expanded(
-                        child: TimelineBar(
-                          start: Duration.zero,
-                          duration: Duration(milliseconds: trace.usage.total),
-                          total: Duration(milliseconds: peak <= 0 ? 1 : peak),
-                          color: theme.colorScheme.primary.withValues(alpha: 0.75),
-                          height: 6,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      SizedBox(
-                        width: 52,
-                        child: Text(
-                          formatTokens(trace.usage.total),
-                          textAlign: TextAlign.right,
-                          style: AppType.tabular(
-                            theme.textTheme.bodySmall!.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      if (metaOf(trace) case final meta?)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            meta,
+                            style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: dsh.textTertiary)),
                           ),
                         ),
-                      ),
-                      SizedBox(
-                        width: 64,
-                        child: Text(
-                          trace.usage.cacheHitRate == null
-                              ? ''
-                              : l10n.hubSessionCacheHit(formatPercent(trace.usage.cacheHitRate!)),
-                          textAlign: TextAlign.right,
-                          style: AppType.tabular(theme.textTheme.bodySmall!.copyWith(color: dsh.textTertiary)),
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -1410,6 +1435,7 @@ class SubagentsTab extends ConsumerWidget {
                       final span = spanOf(call.callId);
                       final turn = turnOf(call.callId);
                       final status = switch (call.status) {
+                        _ when view.phoneResult != null => view.phoneResult!.word,
                         ToolStatus.succeeded => l10n.commonCompleted,
                         ToolStatus.failed => l10n.commonFailed,
                         ToolStatus.cancelled => l10n.commonCancelled,
@@ -1425,7 +1451,9 @@ class SubagentsTab extends ConsumerWidget {
                           if (span?.duration case final d?) formatSpan(d),
                           if (turn != null) l10n.hubSessionTurn(turn),
                         ].join(' · '),
-                        subtitleColor: call.status == ToolStatus.failed ? dsh.danger : null,
+                        subtitleColor: call.status == ToolStatus.failed && (view.phoneResult?.isFault ?? true)
+                            ? dsh.danger
+                            : null,
                         chevron: span != null && turn != null,
                         onTap: span == null || turn == null
                             ? null

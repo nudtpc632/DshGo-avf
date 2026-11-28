@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../l10n/l10n.dart';
 import '../../launch/launch_state.dart';
 import '../../launch/startup_trace.dart';
 import '../../runtime/local_footprint.dart';
@@ -13,12 +14,17 @@ import '../../diagnostics/automatic_diagnostics.dart';
 import '../../runtime/runtime_bridge.dart';
 import '../../runtime/runtime_state.dart';
 import '../../share_code/guest_fs.dart';
+import '../../state/android_features.dart';
+import '../../state/app_mode_state.dart';
 import '../../state/engine_control.dart';
 import '../../state/hosts_state.dart';
 import '../../state/notify_state.dart';
+import '../../state/ohos_linux_state.dart';
 import '../../state/onboarding_state.dart';
 import '../../state/settings_state.dart';
 import '../../ui_config/ui_skill.dart';
+import '../../usage/usage_stats.dart';
+import '../common/usage_privacy_notice.dart';
 import '../onboarding/onboarding_flow.dart';
 import '../onboarding/setup_progress.dart';
 import '../remote/remote_screen.dart';
@@ -106,6 +112,12 @@ class _RootGateState extends ConsumerState<RootGate> {
   bool _launchReady = false;
   OnboardingStep? _step;
   bool _autoStartDone = false;
+  void Function(UsageOutcome, {UsageOperation? actual})? _setupUsage;
+
+  void _observeSetup(UsageOperation kind) {
+    _setupUsage?.call(UsageOutcome.unknown);
+    _setupUsage = ref.read(usageStatsProvider.notifier).beginOperation(kind);
+  }
 
   /// The setup step asks 本机 or 远程主机 first ([runtimeStepAsks]).
   bool _chooseRuntime = false;
@@ -124,6 +136,10 @@ class _RootGateState extends ConsumerState<RootGate> {
 
   void _goTo(OnboardingStep? step) {
     if (!mounted) return;
+    if (step == null) {
+      _setupUsage?.call(UsageOutcome.ready);
+      _setupUsage = null;
+    }
     setState(() => _step = step);
   }
 
@@ -168,10 +184,12 @@ class _RootGateState extends ConsumerState<RootGate> {
 
   /// 「本机」: unpack in the background, set up meanwhile.
   void _chooseLocal() {
+    _observeSetup(UsageOperation.onboardingLocal);
     _beside = true;
     unawaited(_prefs.setSetupStep(SetupStep.appearance));
     _startUnpack();
     _goTo(OnboardingStep.appearance);
+    unawaited(showUsagePrivacyNotice(context, platform: ref.read(operatingSystemProvider)));
   }
 
   void _afterAppearance() {
@@ -218,17 +236,35 @@ class _RootGateState extends ConsumerState<RootGate> {
   Future<void> _useRemote() async {
     if (_pickingRemote) return;
     _pickingRemote = true;
+    _observeSetup(UsageOperation.onboardingRemote);
     try {
       await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const RemoteScreen()));
     } finally {
       _pickingRemote = false;
     }
-    if (!mounted || ref.read(activeHostProvider).isLocal) return;
+    if (!mounted || ref.read(activeHostProvider).isLocal) {
+      _setupUsage?.call(UsageOutcome.cancelled);
+      _setupUsage = null;
+      return;
+    }
     if (_beside) _leaveBeside();
     await ref.read(onboardingPrefsProvider.notifier).setLocalDeclined(true);
     // What installing does on the other path: Android 13 asks about
     // notifications once the channels exist, before the first reply lands.
     unawaited(ref.read(notifyChannelProvider).status().then<void>((_) {}, onError: (_) {}));
+    _autoStartDone = true;
+    _goTo(null);
+  }
+
+  /// 「和角色聊天」: 酒馆 talks to the model itself, so it needs neither the
+  /// runtime nor a key before the first message (it asks then). The app runs
+  /// without the runtime, as on a remote host, until 工作 installs it; every
+  /// launch opens in 酒馆 until the person picks another mode.
+  void _chooseTavern() {
+    _observeSetup(UsageOperation.onboardingTavern);
+    if (_beside) _leaveBeside();
+    unawaited(ref.read(appModeProvider.notifier).setStartup(AppMode.tavern));
+    unawaited(_prefs.setLocalDeclined(true));
     _autoStartDone = true;
     _goTo(null);
   }
@@ -251,7 +287,7 @@ class _RootGateState extends ConsumerState<RootGate> {
     final status = ref.read(localRuntimeProvider).status;
     // After repeated crashes with automatic safe mode off, the failure card
     // waits for the user instead of starting again.
-    if (status.phase == RuntimePhase.installed && EngineControl.shouldAutoStart(status)) {
+    if (EngineControl.startsAtLaunch(status)) {
       unawaited(ref.read(localRuntimeProvider.notifier).start());
     }
   }
@@ -320,6 +356,8 @@ class _RootGateState extends ConsumerState<RootGate> {
     ref.listen(localRuntimeProvider.select((s) => s.status.phase), (_, next) {
       if (next == RuntimePhase.running) {
         _publishDiagnostics();
+        // The engine forgets the Linux switch and proxy on every start.
+        if (ref.read(operatingSystemProvider) == 'ohos') unawaited(ref.read(ohosLinuxProvider.notifier).restore());
       } else {
         _publishedDiagnostics = false;
       }
@@ -350,6 +388,7 @@ class _RootGateState extends ConsumerState<RootGate> {
           chooseRuntime: _chooseRuntime,
           beside: _beside,
           onLocal: _chooseRuntime ? _chooseLocal : null,
+          onTavern: _chooseRuntime ? _chooseTavern : null,
           onAppearanceDone: _afterAppearance,
           onAccessDone: _afterAccess,
           onFinished: _afterFinishing,
@@ -403,6 +442,24 @@ class _Splash extends StatefulWidget {
   State<_Splash> createState() => _SplashState();
 }
 
+/// HarmonyOS finishes a reset as the app opens, before the first status: a
+/// reinstall can take a while under the mark.
+class _ResetFinishing extends ConsumerWidget {
+  const _ResetFinishing();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(operatingSystemProvider) != 'ohos' ||
+        ref.watch(localRuntimeProvider.select((s) => s.progress)) == null) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 16),
+      child: Text(context.l10n.harmonyResetFinishing, style: Theme.of(context).textTheme.bodySmall),
+    );
+  }
+}
+
 class _SplashState extends State<_Splash> {
   bool _visible = false;
   Timer? _timer;
@@ -430,7 +487,10 @@ class _SplashState extends State<_Splash> {
           child: AnimatedOpacity(
             opacity: _visible ? 1 : 0,
             duration: AppMotion.of(context, AppMotion.slow),
-            child: const BrandMark(size: 64, tile: true),
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [BrandMark(size: 64, tile: true), _ResetFinishing()],
+            ),
           ),
         ),
       ),

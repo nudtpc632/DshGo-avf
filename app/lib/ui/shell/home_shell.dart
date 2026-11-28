@@ -23,6 +23,7 @@ import '../bots/bot_alerts.dart';
 import '../chat/chat_screen.dart';
 import '../chat/composer_toast.dart' show composerToastGap;
 import '../engine/engine_screen.dart';
+import '../engine/reset_outcome.dart';
 import '../features/all_features_page.dart';
 import '../forum/forum_link_host.dart';
 import '../notify/background_net_host.dart';
@@ -32,6 +33,7 @@ import '../notify/voice_model_host.dart';
 import '../plugins/plugins_screen.dart';
 import '../pets/pet_settings_page.dart';
 import '../phone/phone_stop_watcher.dart';
+import '../phone/system_actions_host.dart';
 import '../remote/host_switcher.dart' show showHostSheet;
 import '../remote/remote_screen.dart';
 import '../safe_mode/safe_mode_notice_listener.dart';
@@ -44,7 +46,7 @@ import '../star/star_prompt_host.dart';
 import '../theme/theme.dart';
 import '../update/update_launch_check.dart';
 import '../wallpaper/wallpaper_backdrop.dart';
-import '../web/local_web_screen.dart';
+import '../web/dsh_web_launcher.dart';
 import 'adaptive/adaptive_layout.dart';
 import 'adaptive/adaptive_rail.dart';
 import 'adaptive/adaptive_scaffold.dart';
@@ -232,7 +234,8 @@ class _HomeShellState extends ConsumerState<HomeShell> with TickerProviderStateM
 
   void _openDestination(DrawerDestination destination) {
     final page = switch (destination) {
-      DrawerDestination.web => const LocalWebScreen(),
+      // The active host's DSH Web, as every other 网页版 entry opens it.
+      DrawerDestination.web => null,
       DrawerDestination.remote => const RemoteScreen(),
       DrawerDestination.plugins => const PluginsScreen(),
       DrawerDestination.engine => const EngineScreen(),
@@ -240,7 +243,11 @@ class _HomeShellState extends ConsumerState<HomeShell> with TickerProviderStateM
       DrawerDestination.settingsSearch => const SettingsSearchPage(),
       DrawerDestination.features => const AllFeaturesPage(),
     };
-    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
+    if (page == null) {
+      openDshWeb(context, ref);
+    } else {
+      Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
+    }
     // Close once the new page covers us, so "back" lands on the chat.
     Future<void>.delayed(AppMotion.slow, () {
       if (!mounted) return;
@@ -345,8 +352,15 @@ class _HomeShellState extends ConsumerState<HomeShell> with TickerProviderStateM
                       // one line under the header (draws nothing here).
                       if (ref.watch(androidSystemFeaturesProvider))
                         const BackgroundNetHost()
-                      else
+                      else ...[
                         const BackgroundPauseHost(),
+                        if (ref.watch(operatingSystemProvider) == 'ohos') ...[
+                          // 系统操作: its session and a handoff's prompt (draws nothing here).
+                          const SystemActionsHost(),
+                          // How a reset asked for before the app reopened came out (draws nothing).
+                          const ResetReceiptHost(),
+                        ],
+                      ],
                       // Daily update check + install resume (draws nothing).
                       const UpdateLaunchCheck(),
                       // The voice model chosen during setup: download, resume, ready / failed notices (draws nothing).

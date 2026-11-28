@@ -11,6 +11,149 @@
 ### English
 
 - **Fix: custom model providers and other settings lost after a restart on the AVF engine.** The AVF virtual machine keeps engine data on a memory disk, and previously it was only snapshotted to phone storage when the engine was stopped gracefully from inside the app; a system kill after swiping the app away, a force-stop or an unexpected VM exit saved nothing, so custom model providers and settings changes were gone after a restart. The app now snapshots automatically every 15 seconds while the engine runs (unchanged content is not rewritten), so an ungraceful exit no longer loses your configuration. Force-stopping the app within 15 seconds of a change can still lose that last change. Reproduced the loss on the old build and verified the full add-provider → force-stop → relaunch → provider-restored loop on two real devices (a Raspberry Pi 5 on Android 17 and an Android 16 tablet); the tablet also kills the VM from outside on its own, which the periodic snapshots cover as well.
+## 1.4.1 · 2026-11-27
+
+### 中文
+
+#### 改进
+
+- **对话显示解码速度。** 每轮结束的脚注、用量弹层和对话详情新增 `tokens/秒`（输出 token ÷ 解码时长，与单步详情同一口径）；子代理数量按会话谱系统计。
+- **远程主机后台连接。** 连上远程主机后由独立的前台服务维持连接：切到后台或息屏不再受 App 自设时限，也不会顺带启动本机引擎。后台运行页新增「远程连接保活」，可选静音音频和保护性后台定位（默认关闭，定位只用大致位置，不保存也不发送坐标）。
+- **状态显示更清楚。** 远程主机时顶栏把「主机连接」和「会话同步」分开显示，中继连接直接显示实际线路。
+
+#### 修复
+
+- **DS Bot 走中继。** 中继上通过 `dsBot/call`、`dsBot/feed` 访问 DS Bot（需要远端 Host 插件包含 ds-harness-remote#605）；只对可以安全重放的读操作重试，操作不会被执行两次。
+- **更新检查。** 多个官方源并行比较，选出版本最新的一个，旧的内测源不会再挡住 GitHub 正式版；打开 App 和从后台返回都会检查（成功检查后 24 小时内不重复）；检查失败时，已下载的安装包仍可校验并安装。
+- **OpenAI 订阅渠道支持图片。** ChatGPT 订阅渠道按官方声明的模型能力接收图片，可以直接发图。
+- **创意工坊投稿。** 可以投稿主题包，也可以直接选择 ZIP；投稿完成后回到「我的投稿」并看到这一条。
+- **tawcroot 启动。** 显式的 `/dev/shm` 绑定优先，不再被进程内的共享内存模拟覆盖。
+- **鸿蒙。** 修复真机图像打包、Inspector 与生命周期同步。
+
+#### 验证情况
+
+这版改动大多只经过自动测试和编译检查；1.4.1 的测试包在一台 vivo X200 Pro（Android 16）上装过并启动。远程主机后台保活、DS Bot 中继、OpenAI 订阅图片和更新检查需要相应的主机或账号，尚未逐项在真机上验证。
+
+### English
+
+#### Improvements
+
+- **Decoding speed in chats.** The end-of-turn footnote, the usage sheet and the conversation details now show `tokens/sec` (output tokens ÷ decoding time, the same measure as the step details), and the subagent count comes from the conversation lineage.
+- **Remote hosts in the background.** Once connected, a dedicated foreground service keeps the remote link alive: leaving the app or turning the screen off no longer runs into a self-imposed limit, and the local engine is not started. The background page gains remote connection protection — silent audio and protective background location, both off by default; location is coarse only and is never stored or sent.
+- **Clearer status.** With a remote host, the header shows the host link and the conversation sync state separately, and relay connections show the actual route.
+
+#### Fixes
+
+- **DS Bot over the relay.** DS Bot is reached through `dsBot/call` and `dsBot/feed` on relay hosts (the remote host plugin must include ds-harness-remote#605); only reads that are safe to replay are retried, so an action is never executed twice.
+- **Update checks.** Official sources are compared in parallel and the newest release wins, so a stale beta feed can no longer hide the GitHub release; checks run at launch and on returning to the app (at most once per 24 hours after a successful check); when a check fails, an already downloaded package can still be verified and installed.
+- **Images with an OpenAI subscription.** Models on the ChatGPT subscription channel now take images according to their declared capabilities.
+- **Workshop submissions.** Theme packs can be submitted, or a ZIP picked directly; a finished submission lands back in My uploads with the new entry.
+- **tawcroot launch.** Explicit `/dev/shm` binds take precedence instead of being shadowed by per-process shared-memory emulation.
+- **HarmonyOS.** Fixed on-device image packaging, the Inspector and lifecycle sync.
+
+#### Testing
+
+Most of this version has only been checked by automated tests and builds; the 1.4.1 test build was installed and started on a vivo X200 Pro (Android 16). Remote background protection, DS Bot over the relay, images on the OpenAI subscription and update checks need the matching host or account and have not each been verified on a real device.
+
+## 1.4.0 · 2026-11-25
+
+### 中文
+
+#### 新功能
+
+- **伙伴小屋有了完整模式。** 伙伴可以在自己的 DSH 会话里工作，小屋里能直接看进度、打电话或打开她的主会话。也可以养多个伙伴，或在 Android 上把伙伴设为系统默认助理。
+- **Android 手机操控有了悬浮岛和手机技能。** 操作进度能显示在屏幕顶部或支持的系统灵动岛里。完成任务后，可以把做法保存成手机技能，下次直接调用。
+- **OpenAI 官方渠道。** 支持的 Android 本机引擎可以用 ChatGPT 账号授权订阅，选用该账号可用的模型。
+- **酒馆和外观。** 补充了 SillyTavern 1.19 预设与 SPreset 支持。创意工坊的主题包可以改更多界面细节，壁纸也支持动图。
+- **iOS 实时活动。** 可以在锁屏和灵动岛查看进度。
+
+#### 修复与改进
+
+- 修复远程主机网页版偶尔打不开、部分连接断开后无法恢复的问题。
+- 修复终端键盘无法重新唤起、复制粘贴异常，以及部分 vivo 手机上手机操控无法读回结果的问题。
+- 减轻长对话和流式回复时的卡顿，修复通话字幕偶尔截断表情的问题。
+
+### English
+
+#### New features
+
+- **Full mode in the companion room.** Your companion can work in her own DSH session. See progress, call her or open her main session from the room. You can keep multiple companions or set your companion as Android’s default assistant.
+- **Floating island and phone skills on Android.** See phone control progress at the top of the screen or in the system island on supported phones. After a task, you can save the steps as a phone skill and use it again later.
+- **Official OpenAI channel.** On supported local Android engines, sign in with a ChatGPT account to authorize your subscription and use the models available to it.
+- **Tavern and appearance.** Expanded SillyTavern 1.19 preset and SPreset support. Workshop themes can customize more of the interface, and wallpapers can be animated.
+- **iOS Live Activities.** See progress on the Lock Screen and Dynamic Island.
+
+#### Fixes and improvements
+
+- Fixed cases where a remote host’s web app failed to open or a dropped connection failed to recover.
+- Fixed reopening the terminal keyboard, copying and pasting, and reading phone control results back on some vivo phones.
+- Reduced stutter in long chats and streaming replies. Fixed call captions occasionally cutting off emoji.
+
+## 1.3.0 · 2026-11-21
+
+### 中文
+
+- **顶栏一键语音通话。** 首页右上角、新对话按钮旁边多了通话按钮，新对话里也能直接打。
+- **长按就能选字。** 长按回复或自己发的消息直接选中按到的词，拖两端改范围；选区上有复制、引用、分享、朗读、全选，「更多」里是原来的消息菜单。自己发的消息也能引用了。朗读选中的文字时，里面的密码、密钥不会念出来。
+- **远程主机：对话备份和网页版。** 远程主机页可以把主机上的对话加密备份到手机，再恢复到原来的或另一台主机（每次恢复新建对话，不覆盖；附件和工作区源码不迁移）。主机支持时，还能在 App 里直接打开主机的 DSH 网页版，不用把登录凭据交给浏览器；服务繁忙时会提示「人太多了，请稍后重试」。
+- **后台保护（需要自己打开）。** 设置里新增后台运行保护，默认关闭。打开后本机长任务切到后台更不容易被系统杀掉，被系统收回时如实显示，不会假装还在运行。iOS 可以选静音音频或后台定位来保活，都要自己授权，不保存也不上传位置。
+- **酒馆。**
+  - 支持酒馆助手脚本库：全局、预设、角色卡里的脚本都能运行。预设的脚本能拿到 SillyTavern 的事件和当前预设，像小猫之神这类预设的菜单现在能出来；脚本面板在画布里显示，开关会写回预设。
+  - 大卡明显不卡了：重卡导入、卡库列表、长历史显示快了数倍，卡库占用减少约三分之二。前端卡只渲染屏幕上看得见的消息，写回复时少了很多多余重建。新增「省电渲染」开关（酒馆设置 › 显示，默认关）：关掉卡片网页里的毛玻璃，循环动画只播一遍。
+  - 上下文满了一次裁掉一截，而不是每条都裁，模型的缓存能持续命中，更快也更省钱（默认开）。
+  - 前端卡的开场白不再显示成一堆代码；深色模式下卡片颜色和网页文字看得清；酒馆界面统一了间距、样式和文案，加了克制的动效。
+- **伙伴小屋更清晰。** 小屋按屏幕本身的像素密度渲染（之前最多按 2 倍），卡顿时临时降低的清晰度流畅后会自己升回来。
+- **新桌宠「小粉鱼」。** 第三只内置宠物，带 18 种状态动画和 3 段待机小动作；切换动作时淡入淡出。
+- **分享长图。** 分享成图片时保留完整正文，生成一张长图，不再截掉后半段。
+- **本机引擎默认用 tawcroot 启动**（Android 10 及以上）：启动更快；起不来会自动退回原来的兼容启动（PRoot），不弹故障卡。之前手动关过的保持原样。卓易通上 PRoot 启动失败时，故障卡上会出现「用 tawcroot 启动」。
+- **修复。** 升级到 1.1.0 后本机新建对话失败；本机用久了会话列表超过 8 MB 就整个加载失败；配了多台 DNS 时第一台拒绝就联网失败；插件配置里 API Key 填不进去；Android 10 用 Shizuku 授权后手机操控报「身份改变」；HyperOS / Android 16 一直 60 Hz（刷新率设置现在也作用到画面本身）；APK 已下好但空间只够一份时误报空间不足；同一路径的图片被覆盖后，旧消息里显示成新图；模型列表接口返回 404 时现在会提示可以手动添加模型；模型选择里过长的名字显示不全；伙伴自动想起记忆时误把子代理配置当成对话内容；桌宠、悬浮窗菜单、伙伴小组件和网页岛的几处显示问题。
+- **验证情况。** 这一版的新功能大部分只经过自动测试和编译检查，tawcroot 默认启动、后台保护、远程备份和网页版都没有在各种真机上完整走过。iOS 安装包等 CI 编完会补到这个版本下；鸿蒙 HAP 这一版仍不提供。遇到问题请导出诊断并开 issue。
+
+### English
+
+- **One-tap voice call in the top bar.** A call button sits next to New chat in the top right, and works from a new chat too.
+- **Long-press to select text.** Long-press a reply or your own message to select the word under your finger, then drag the handles. The selection bar has Copy, Quote, Share, Read aloud and Select all; More opens the usual message menu. Your own messages can be quoted too. Reading a selection aloud skips any passwords or keys in it.
+- **Remote hosts: chat backup and the web app.** The remote host page can back up the host's chats to the phone, encrypted, and restore them to the same or another host (each restore makes a new chat and overwrites nothing; attachments and workspace source are not moved). When the host supports it, you can open its DSH web app inside the app without handing your credentials to a browser; when the service is busy it says so and asks you to try later.
+- **Background protection (opt-in).** Settings has a new background protection option, off by default. When on, long local tasks are less likely to be killed in the background, and when the system takes the time back the app says so instead of pretending the engine is still running. On iOS you can choose silent audio or background location to keep it alive; both need your permission, and location is never stored or sent.
+- **Tavern.**
+  - Tavern Helper script library: scripts from global settings, presets and character cards all run. Preset scripts get SillyTavern's event source and the current preset, so menus from presets such as Meowssiah now show up; the script panel shows in the canvas and its switches are written back to the preset.
+  - Large cards no longer stutter: importing heavy cards, the card library list and long histories are several times faster, and the card library takes about a third of the space. Frontend cards only render the messages on screen, and writing a reply triggers far fewer rebuilds. A new Power-saving rendering switch (Tavern settings › Display, off by default) turns off frosted glass in card pages and plays looping animations once.
+  - When the context fills up, it is trimmed in one larger step instead of one message at a time, so the model's cache keeps hitting: faster and cheaper (on by default).
+  - Frontend cards' opening messages no longer show as raw code; card colors and web text are readable in dark mode; the Tavern screens have consistent spacing, styles and wording, with restrained motion.
+- **Sharper companion room.** The room renders at the screen's own pixel density (it was capped at 2x before), and resolution lowered during stutters comes back once things are smooth.
+- **New pet: Pink Fish.** A third built-in pet with 18 state animations and 3 idle moments; switching animations now fades.
+- **Long share images.** Sharing as an image keeps the whole message and makes one long image instead of cutting off the end.
+- **The local engine starts with tawcroot by default** (Android 10 and later): faster to start; if it can't start, the app falls back to the compatible launcher (PRoot) on its own without an error card. If you turned tawcroot off before, that is kept. On Zhuoyitong, when PRoot fails to start the error card offers Start with tawcroot.
+- **Fixes.** New local chats failing after upgrading to 1.1.0; the local chat list failing to load once it grew past 8 MB; no network when the first of several configured DNS servers refused; API keys that couldn't be entered in plugin settings; phone control reporting "identity changed" on Android 10 after Shizuku authorization; HyperOS / Android 16 stuck at 60 Hz (the refresh rate setting now applies to the drawing surface too); a false out-of-space error when the APK was already downloaded; older messages showing the new image after a file at the same path was overwritten; a 404 from the model list now says models can be added by hand; long model names cut off in the model picker; the companion's automatic memory recall mistaking subagent settings for conversation; several display issues in pets, the floating menu, the companion widget and web islands.
+- **Testing.** Most new features in this version have only been checked by automated tests and builds; tawcroot by default, background protection, remote backup and the web app have not been fully tried on a range of real devices. The iOS package will be added to this release once CI finishes; there is still no HarmonyOS HAP in this version. If you run into a problem, please export diagnostics and open an issue.
+
+## 1.2.0 · 2026-11-18
+
+### 中文
+
+- **iOS 版（测试）。** 这一版起提供未签名的 iOS 安装包 `dsh-go-1.2.0-ios-unsigned.ipa`，需要用爱思助手、AltStore 等工具自己签名后安装。用免费 Apple ID 签名时 Bundle ID 会被改掉，部分能力（如 Siri、分享扩展、后台）可能用不了。iOS 版只在少数真机上试过，问题请开 issue。
+- **鸿蒙版合入主线。** 鸿蒙版的代码已经和安卓、iOS 共用一套，这一版暂时不提供 HAP 安装包，签名就绪后再补到这个版本下。
+- **酒馆。** 酒馆助手的接口补齐，支持原生 MVU 变量；能把 DeepSeek 网页里聊不下去的对话导入酒馆接着聊；导入大卡和长聊天时明显不卡了。
+- **让 AI 做一只宠物。** 宠物页新增「让 AI 做一只宠物」：带上自己的素材（GIF、逐帧图、Aseprite 导出或单张图），AI 会把它转成宠物包；转换时保留中文动画名，网页模式也能用。
+- **按你问过的话搜索会话。** 会话搜索能搜到你自己问过的话和回复摘要，句子中间的中文词也能搜到。
+- **手机操控确认改成三档**：允许一次、本轮允许、取消；设置里可以列一份「始终允许」的 App。停止只作用于当前这一轮，下一轮自动恢复。免确认模式下截图和点击不再弹卡。
+- **长回复更流畅。** 长回复分块显示，流式输出时只重排最后一块。
+- 其他改进：选 English 时 App 写给引擎的 AGENTS.md 也用英文；伙伴包的大小上限放宽，投稿失败会说清原因；桌面小组件的默认文字跟随 App 语言；跳过的版本换了更新源后也算跳过。
+- **修复。** 安卓引擎在某些情况下重启被锁死；DeepSeek 的拒绝回复和无名错误被当成网络错误；生成图片时网关返回空链接导致图片丢失；首次 DNS 失败占用当天的生成额度；回合结束但没有答复时没有任何提示；Windows 主机的盘符路径和链接打不开、长文件名存不到手机；换启动画面或壁纸时旧文件被提前删掉；快速切换主机后最近会话停在上一个；未发出的草稿丢失；读屏无法点击详情页签和主题选项。
+- **验证情况。** iOS 版和鸿蒙版都只在 CI 里编译并跑过模拟器测试，真机只做过零星试用；安卓版的新改动大部分只经过自动测试。遇到问题请导出诊断并开 issue。
+
+### English
+
+- **iOS (testing).** Starting with this version there is an unsigned iOS package, `dsh-go-1.2.0-ios-unsigned.ipa`, which you sign yourself with a tool such as AltStore before installing. Signing with a free Apple ID changes the bundle ID, and some features (such as Siri, the share extension and background work) may not be available. The iOS version has only been tried on a few real devices; please open an issue if something goes wrong.
+- **HarmonyOS joins the main line.** The HarmonyOS code now shares one code base with Android and iOS. This version doesn't ship a HAP yet; it will be added to this release once signing is ready.
+- **Tavern.** The Tavern Helper interfaces are complete, with native MVU variables; conversations that ran out of room on the DeepSeek website can be imported into Tavern and continued; importing large cards and long chats no longer stutters.
+- **Have the AI make a pet.** The pets page has a new Have the AI make a pet entry: bring your own art (GIFs, frame sequences, Aseprite exports or a single image) and the AI turns it into a pet pack; Chinese animation names are kept, and it works in web mode too.
+- **Search chats by what you asked.** Chat search finds your own questions and reply summaries, including Chinese words in the middle of a sentence.
+- **Phone control confirmation has three choices**: allow once, allow for this turn, or cancel, and Settings can keep a list of always-allowed apps. Stop only applies to the current turn; the next turn starts fresh. Screenshots and taps no longer show a card when confirmation is off.
+- **Smoother long replies.** Long replies are rendered in blocks, and while streaming only the last block is laid out again.
+- Other improvements: with English selected, the AGENTS.md the app writes for the engine is in English too; companion pack size limits are looser and failed submissions say why; the home screen widget's default text follows the app language; a skipped version stays skipped after switching update source.
+- **Fixes.** The Android engine getting stuck on restart in some cases; DeepSeek refusals and unnamed errors being reported as network errors; images lost when the gateway returned an empty link; a first DNS failure using up the day's generation budget; no notice when a turn ended without an answer; drive-letter paths and links from Windows hosts not opening, and long file names not saving to the phone; the old file being deleted too early when changing the launch screen or wallpaper; recent chats sticking to the previous host after switching quickly; unsent drafts being lost; screen readers not being able to tap detail tabs and theme options.
+- **Testing.** The iOS and HarmonyOS versions have only been compiled and run on simulators in CI, with only occasional tries on real devices; most of the new Android changes have only been checked by automated tests. If you run into a problem, please export diagnostics and open an issue.
 
 ## 1.1.0 · 2026-11-15
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:dsh_app/state/android_features.dart';
 import 'package:dsh_app/l10n/l10n.dart';
 import 'package:dsh_app/remote/link_status.dart';
 import 'package:dsh_app/remote/secret_store.dart';
@@ -11,6 +12,7 @@ import 'package:dsh_app/ui/remote/remote_screen.dart';
 import 'package:dsh_app/ui/settings/settings_widgets.dart';
 import 'package:dsh_client/dsh_client.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -20,16 +22,26 @@ import 'support/fake_relay.dart';
 const _host = HostRef.relay('mac');
 
 class _InspectableLink extends HostLink implements NetworkInspectableHostLink {
-  _InspectableLink(this.status);
+  _InspectableLink(this._status);
+
+  HostLinkStatus _status;
+  VoidCallback? onStatusSample;
 
   @override
-  HostLinkStatus status;
+  HostLinkStatus get status {
+    final snapshot = _status;
+    final onSample = onStatusSample;
+    onStatusSample = null;
+    onSample?.call();
+    return snapshot;
+  }
+
   final changes = StreamController<HostLinkStatus>.broadcast(sync: true);
   int inspections = 0;
   Future<RemoteNetworkStatus?> Function()? inspect;
 
   void emit(HostLinkStatus next) {
-    status = next;
+    _status = next;
     changes.add(next);
   }
 
@@ -65,12 +77,43 @@ void main() {
     SharedPreferences.setMockInitialValues({ActiveHostController.prefsKey: _host.encode()});
   });
 
+  test('the host link subscription sees a broadcast scheduled during the initial snapshot', () async {
+    final link = _InspectableLink(const HostLinkStatus(HostLinkPhase.connecting));
+    addTearDown(link.changes.close);
+    bool? listeningWhenSampled;
+    link.onStatusSample = () {
+      // A fast handshake completes before the old async* resumes after its first yield.
+      listeningWhenSampled = link.changes.hasListener;
+      scheduleMicrotask(() => link.emit(const HostLinkStatus(HostLinkPhase.connected)));
+    };
+    final container = ProviderContainer(overrides: [hostLinkProvider.overrideWith((ref, host) => link)]);
+    addTearDown(container.dispose);
+    final provider = hostLinkStatusProvider(_host);
+    final phases = <HostLinkPhase>[];
+    container.listen(provider, (_, next) {
+      if (next.value case final status?) phases.add(status.phase);
+    }, fireImmediately: true);
+    await Future<void>.delayed(Duration.zero);
+    expect(listeningWhenSampled, isTrue);
+    expect(phases, [HostLinkPhase.connecting, HostLinkPhase.connected]);
+
+    link.emit(const HostLinkStatus(HostLinkPhase.reconnecting));
+    link.emit(const HostLinkStatus(HostLinkPhase.connected));
+    await Future<void>.delayed(Duration.zero);
+    expect(phases, [
+      HostLinkPhase.connecting,
+      HostLinkPhase.connected,
+      HostLinkPhase.reconnecting,
+      HostLinkPhase.connected,
+    ]);
+  });
+
   Future<void> frames(WidgetTester tester) async {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
   }
 
-  Future<void> pump(WidgetTester tester, _InspectableLink link, {bool page = false}) async {
+  Future<void> pump(WidgetTester tester, _InspectableLink link, {bool page = false, String? os}) async {
     usePhoneSurface(tester);
     addTearDown(link.changes.close);
     await tester.pumpWidget(
@@ -83,6 +126,7 @@ void main() {
           relayBackendProvider.overrideWithValue(FakeRelayBackend(user: sampleRelayUser)),
           hostLinkProvider.overrideWith((ref, host) => link),
           hostNameProvider.overrideWith((ref, host) => 'Workstation'),
+          if (os != null) operatingSystemProvider.overrideWithValue(os),
           localRuntimeProvider.overrideWith(
             () => FakeRuntime(const LocalRuntimeState(loaded: true, status: runningStatus)),
           ),
@@ -106,6 +150,7 @@ void main() {
     await pump(tester, _InspectableLink(HostLinkStatus.idle), page: true);
     final compact = find.byKey(const ValueKey('remote-compact-history'));
     await tester.scrollUntilVisible(compact, 300);
+    await tester.pump();
     expect(SettingsIndex.spot('remote-compact-history'), isNotNull);
     expect(tester.widget<SettingsSwitchTile>(compact).value, isFalse);
     expect(find.textContaining('切换主机或重启 App 后生效'), findsOneWidget);
@@ -225,6 +270,31 @@ void main() {
     expect(find.textContaining('192.168'), findsNothing);
     expect(find.textContaining('SDP'), findsNothing);
     expect(link.status.isConnected, isTrue);
+  });
+
+  group('without a direct path to try (HarmonyOS)', () {
+    final zh = lookupL10n(AppLocale.zhCN);
+    _InspectableLink relayOnly() => _InspectableLink(
+      const HostLinkStatus(
+        HostLinkPhase.connected,
+        path: RelayPath.relay,
+        network: RemoteNetworkStatus(path: RelayPath.relay, fallbackReason: 'webrtcUnavailable'),
+      ),
+    );
+
+    testWidgets('on HarmonyOS: the relay is simply how this version connects', (tester) async {
+      await pump(tester, relayOnly(), os: 'ohos');
+      expect(find.textContaining(zh.harmonyNetworkRelayOnly), findsOneWidget);
+      expect(find.text(zh.harmonyNetworkFallbackRelayOnly), findsOneWidget);
+      expect(find.textContaining('LAN → P2P'), findsNothing);
+      expect(find.text(zh.remoteNetworkFallbackWebrtcUnavailable), findsNothing);
+    });
+
+    testWidgets('on Android: the order it tries, and the device at fault', (tester) async {
+      await pump(tester, relayOnly(), os: 'android');
+      expect(find.textContaining(zh.remoteNetworkAutomatic), findsOneWidget);
+      expect(find.text(zh.remoteNetworkFallbackWebrtcUnavailable), findsOneWidget);
+    });
   });
 
   testWidgets('fallback codes are explained in the current language', (tester) async {

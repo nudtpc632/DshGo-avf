@@ -78,6 +78,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     Object? Function()? inputOwner,
     Future<VoiceMode> Function()? mode,
     bool Function()? modelReady,
+    bool Function()? harmony,
     this._cloud,
     this._cloudLikely,
     this._signedIn,
@@ -88,6 +89,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }) : _mode = mode ?? _automatic,
        _inputOwner = inputOwner ?? client,
        _modelReady = modelReady ?? _noModel,
+       _harmony = harmony ?? _noModel,
        _observing = observeLifecycle {
     if (_observing) {
       final binding = WidgetsBinding.instance;
@@ -98,6 +100,8 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     }
     unawaited(refresh());
   }
+
+  String get _noRecognizer => _harmony() ? appL10n.harmonyVoiceSystemUnavailable : appL10n.voiceConfigureEither;
 
   static Future<VoiceMode> _automatic() async => VoiceMode.auto;
   static bool _noModel() => false;
@@ -116,6 +120,10 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   /// The on-device voice model is ready for this host (voice settings):
   /// automatic mode then records for it instead of trying the phone service.
   final bool Function() _modelReady;
+
+  /// HarmonyOS: the recogniser is the system's own, so there is none to choose,
+  /// and its engine has no model to download.
+  final bool Function() _harmony;
 
   /// The cloud recognizer for a mode, if any (DeepSeek's, or the person's own).
   final VoiceCloudResolver? _cloud;
@@ -149,6 +157,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   DshClient? _probedClient;
   MuxGeneration? _probedGeneration;
   Future<void>? _refreshing;
+  Future<void>? _cancelling;
   int _catalogProbe = 0;
   bool _disposed = false;
   bool _foreground = true;
@@ -167,6 +176,8 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _finalTimeout;
 
   TextEditingValue? _base;
+  // The last text owned by this dictation; external edits keep their draft.
+  String? _draftText;
   int _anchorStart = 0;
   int _anchorEnd = 0;
   String _heard = '';
@@ -262,6 +273,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> start() async {
+    if (_cancelling case final pending?) await pending;
     if (active || _disposed || !_foreground) return;
     final operation = ++_operation;
     _fallbackTried = false;
@@ -328,6 +340,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
       if (cloud != null) {
         final value = input.value;
         _base = value;
+        _draftText = value.text;
         _anchorStart = value.selection.isValid ? value.selection.start : value.text.length;
         _anchorEnd = value.selection.isValid ? value.selection.end : value.text.length;
         _heard = '';
@@ -353,11 +366,21 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
         _runMode == VoiceMode.system || (_runMode == VoiceMode.auto && _caps.recognizer && !_caps.systemUnreliable);
     if (system && !_caps.recognizer) {
       _finish();
-      _say(VoiceMessage(wordsForIos ? appL10n.iosVoiceAllowSystem : appL10n.voiceChooseSystem, change: true));
+      _say(
+        VoiceMessage(
+          _harmony()
+              ? appL10n.harmonyVoiceSystemUnavailable
+              : wordsForIos
+              ? appL10n.iosVoiceAllowSystem
+              : appL10n.voiceChooseSystem,
+          change: true,
+        ),
+      );
       return;
     }
     final value = input.value;
     _base = value;
+    _draftText = value.text;
     _anchorStart = value.selection.isValid ? value.selection.start : value.text.length;
     _anchorEnd = value.selection.isValid ? value.selection.end : value.text.length;
     _heard = '';
@@ -377,12 +400,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
       if (!_current(operation)) return;
       if (target == null) {
         _finish();
-        _say(
-          VoiceMessage(
-            _runMode == VoiceMode.engine ? appL10n.voiceConfigureEngine : appL10n.voiceConfigureEither,
-            change: true,
-          ),
-        );
+        _say(VoiceMessage(_runMode == VoiceMode.engine ? appL10n.voiceConfigureEngine : _noRecognizer, change: true));
         return;
       }
       await _startRecorder(operation, target);
@@ -465,8 +483,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _startLive(int operation) async {
     final live = await _liveWords?.call((words) {
       if (_current(operation) && _phase == VoicePhase.listening && words.isNotEmpty) {
-        _apply(words, provisional: true);
-        _liveShown = true;
+        if (_apply(words, provisional: true)) _liveShown = true;
       }
     });
     if (live == null) return;
@@ -526,8 +543,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
         _say(VoiceMessage(appL10n.chatVoiceNotHeard));
         return;
       }
-      _apply(text, provisional: false);
-      onRecognized?.call();
+      if (_apply(text, provisional: false)) onRecognized?.call();
       _finish();
     } catch (error) {
       if (!_current(operation)) return;
@@ -560,7 +576,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     if (!_current(operation)) return;
     if (target == null) {
       _finish();
-      _say(VoiceMessage(appL10n.voiceConfigureEither, change: true));
+      _say(VoiceMessage(_noRecognizer, change: true));
       return;
     }
     await _startRecorder(operation, target, fallback: true);
@@ -628,8 +644,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
         _say(VoiceMessage(appL10n.chatVoiceNotHeard));
         return;
       }
-      _apply(transcript.text, provisional: false);
-      onRecognized?.call();
+      if (_apply(transcript.text, provisional: false)) onRecognized?.call();
       _finish();
     } catch (_) {
       if (!_current(operation)) return;
@@ -640,19 +655,27 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
 
   void _restoreDraft() {
     final base = _base;
-    if (base == null) return;
+    if (base == null || input.text != _draftText) return;
     final mentions = input;
     if (mentions is MentionTextController) mentions.provisional = TextRange.empty;
+    _draftText = base.text;
     input.value = base;
   }
 
-  Future<void> cancel() async {
-    if (!active) return;
+  bool get cancelling => _cancelling != null;
+
+  Future<void> cancel() {
+    if (_cancelling case final pending?) return pending;
+    if (!active) return Future<void>.value();
     _restoreDraft();
+    final done = Future<void>.sync(bridge.cancel)
+        .catchError((Object _) {
+          // The bridge may already have detached.
+        })
+        .whenComplete(() => _cancelling = null);
+    _cancelling = done;
     _finish();
-    try {
-      await bridge.cancel();
-    } catch (_) {}
+    return done;
   }
 
   void _error(int operation, int code) {
@@ -670,8 +693,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     if (heard.trim().isEmpty) {
       _restoreDraft();
     } else {
-      _apply(heard, provisional: false);
-      onRecognized?.call();
+      if (_apply(heard, provisional: false)) onRecognized?.call();
     }
     _finish();
     if (!VoiceError.noSpeech.contains(code) || heard.trim().isEmpty) _say(VoiceMessage(voiceErrorText(code)));
@@ -706,16 +728,15 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
       _finish();
       _say(VoiceMessage(appL10n.chatVoiceNotHeard));
     } else {
-      _apply(text, provisional: false);
-      onRecognized?.call();
+      if (_apply(text, provisional: false)) onRecognized?.call();
       _finish();
     }
   }
 
   /// Puts [heard] at the anchor of the starting draft.
-  void _apply(String heard, {required bool provisional}) {
+  bool _apply(String heard, {required bool provisional}) {
     final base = _base;
-    if (base == null) return;
+    if (base == null || input.text != _draftText) return false;
     if (!provisional) _liveShown = false;
     final text = base.text;
     final spoken = heard.trim();
@@ -729,8 +750,10 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
     if (mentions is MentionTextController) {
       mentions.provisional = TextRange.empty;
     }
+    final nextText = '$before$inserted$after';
+    _draftText = nextText;
     input.value = TextEditingValue(
-      text: '$before$inserted$after',
+      text: nextText,
       selection: TextSelection.collapsed(offset: caret - trail.length),
     );
     if (mentions is MentionTextController && provisional && spoken.isNotEmpty) {
@@ -739,6 +762,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
         end: _anchorStart + lead.length + spoken.length,
       );
     }
+    return true;
   }
 
   /// Latin words on both sides of the seam get a space; CJK does not.
@@ -772,6 +796,7 @@ class VoiceInputController extends ChangeNotifier with WidgetsBindingObserver {
       mentions.provisional = TextRange.empty;
     }
     _base = null;
+    _draftText = null;
     _engine = null;
     level.value = 0;
     _setPhase(VoicePhase.idle);

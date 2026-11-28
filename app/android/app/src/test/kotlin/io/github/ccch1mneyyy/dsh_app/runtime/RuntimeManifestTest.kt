@@ -27,6 +27,13 @@ class RuntimeManifestTest {
         assertEquals(mapOf("HOME" to "/root"), manifest.launchEnv)
     }
 
+    @Test fun avfOnlyManifestWithoutRootfsHasNoArchives() {
+        val manifest = RuntimeManifest.fromJson(metadata())
+        assertTrue(manifest.archives.isEmpty())
+        assertTrue(manifest.archivesForInstall(false).isEmpty())
+        assertEquals("new", manifest.runtimeVersion)
+    }
+
     @Test fun layeredManifestSelectsBaseAndEngineForFirstInstallButOnlyEngineForUpgrade() {
         val manifest = RuntimeManifest.fromJson(layered())
         assertEquals(listOf("base-arm64-v8a.tar.xz", "engine-arm64-v8a.tar.xz"),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadHostModules, timers, tickRetry, permission } from './lifecycle-host-fixture.mjs';
 
 const modules = await loadHostModules(process.env.DSH_LIFECYCLE_ETS_SOURCE);
-const { RuntimeLifecycle, LifecycleFailure, backgroundComputePermission } = modules;
+const { RuntimeLifecycle, LifecycleFailure, agentReminderAccess, backgroundComputePermission, backgroundComputeStatus } = modules;
 after(() => modules.close());
 const models = [];
 afterEach(() => {
@@ -94,12 +94,25 @@ test('stopping while backoff is armed clears it and prevents any extra permissio
   assert.equal(timers.size, 1); f.model.runtime(null, null); assert.equal(timers.size, 0);
   assert.equal(f.sends.length, 1); assert.equal(f.queries, 1);
 });
+test('reminder access: granted, a build without the permission, a device without the service', () => {
+  const reset = () => Object.assign(permission, { grants: 0, modes: 0, status: 0, supported: true,
+    accessCapability: true, backgroundCapability: true, reminderCapability: true, error: null, requestedModes: null, systemStatus: null });
+  reset(); assert.equal(agentReminderAccess(42), 'granted');
+  assert.deepEqual(permission.last, { id: 42, name: 'ohos.permission.PUBLISH_AGENT_REMINDER' });
+  reset(); permission.status = -1; assert.equal(agentReminderAccess(42), 'denied');
+  reset(); permission.error = Object.assign(new Error('no such permission'), { code: 12100001 });
+  assert.equal(agentReminderAccess(42), 'denied');
+  reset(); permission.reminderCapability = false; assert.equal(agentReminderAccess(42), 'unsupported');
+  assert.equal(permission.grants, 0, 'nothing asked on a device without it');
+});
 test('public eligibility query distinguishes prerequisite denial from unsupported or failed observation', () => {
   const reset = () => Object.assign(permission, { grants: 0, modes: 0, status: 0, supported: true,
-    accessCapability: true, backgroundCapability: true, error: null, requestedModes: null });
+    accessCapability: true, backgroundCapability: true, error: null, requestedModes: null, systemStatus: null });
   reset(); assert.equal(backgroundComputePermission(42), 'granted');
-  assert.deepEqual(permission.last, { id: 42, name: 'ohos.permission.KEEP_BACKGROUND_RUNNING' });
+  assert.deepEqual(permission.last, { id: 42, name: 'ohos.permission.KEEP_BACKGROUND_RUNNING_SYSTEM' });
+  assert.equal(permission.grants, 2);
   assert.deepEqual(permission.requestedModes, [9]); assert.equal(permission.modes, 1);
+  reset(); permission.systemStatus = -1; assert.equal(backgroundComputePermission(42), 'denied'); assert.equal(permission.modes, 0);
   reset(); permission.status = -1; assert.equal(backgroundComputePermission(42), 'denied'); assert.equal(permission.modes, 0);
   reset(); permission.supported = false; assert.equal(backgroundComputePermission(42), 'denied');
   reset(); permission.backgroundCapability = false; assert.equal(backgroundComputePermission(42), 'unknown');
@@ -107,4 +120,35 @@ test('public eligibility query distinguishes prerequisite denial from unsupporte
   reset(); permission.error = Object.assign(new Error('ACL/mode/config'), { code: 9800005 });
   assert.equal(backgroundComputePermission(42), 'unknown');
   reset(); permission.status = 999; assert.equal(backgroundComputePermission(42), 'unknown'); assert.equal(permission.modes, 0);
+});
+
+test('background protection distinguishes real prerequisite failures from user consent', () => {
+  const reset = () => Object.assign(permission, { grants: 0, modes: 0, status: 0, supported: true,
+    accessCapability: true, backgroundCapability: true, error: null, requestedModes: null, systemStatus: null });
+  reset(); const eligible = backgroundComputeStatus(42);
+  assert.equal(eligible.get('supported'), true); assert.equal(eligible.get('permissionStatus'), 'eligible');
+  assert.equal(eligible.get('error'), null); assert.equal(eligible.has('taskActive'), false);
+  reset(); permission.status = -1; const base = backgroundComputeStatus(42);
+  assert.equal(base.get('permissionStatus'), 'permission_required');
+  assert.equal(base.get('error'), 'ohos_background_permission_required');
+  reset(); permission.systemStatus = -1; const acl = backgroundComputeStatus(42);
+  assert.equal(acl.get('permissionStatus'), 'eligibility_required');
+  assert.equal(acl.get('actionRequired'), 'obtain_task_keeping_acl_and_install_entitled_build');
+  assert.equal(permission.modes, 0);
+  reset(); permission.systemStatus = 999; assert.equal(backgroundComputeStatus(42).get('permissionStatus'), 'unknown');
+  reset(); permission.supported = false; assert.equal(backgroundComputeStatus(42).get('permissionStatus'), 'mode_unsupported');
+  reset(); permission.supported = 'unexpected'; assert.equal(backgroundComputeStatus(42).get('permissionStatus'), 'unknown');
+  reset(); permission.backgroundCapability = false; assert.equal(backgroundComputeStatus(42).get('supported'), false);
+  reset(); permission.error = Object.assign(new Error('ACL/config details'), { code: 9800005 });
+  const unknown = backgroundComputeStatus(42); assert.equal(unknown.get('permissionStatus'), 'unknown');
+  assert.equal(unknown.get('error'), 'ohos_background_permission_unknown');
+  assert.equal(JSON.stringify([...unknown]).includes('ACL/config details'), false);
+  reset();
+});
+
+test('native acknowledgement callback failure is consumed and reported', async () => {
+  const transport = { cancel() {}, async send() { return {nativeHost:null,busy:false,manualPaused:false,confirmedPause:true}; } };
+  const model = new RuntimeLifecycle(transport, () => 'unknown', () => {}, () => { throw Error('native unavailable'); });
+  models.push(model); start(model); await flush();
+  assert.equal(model.failureCode(), 'ohos_lifecycle_native');
 });

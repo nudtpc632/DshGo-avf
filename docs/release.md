@@ -16,6 +16,7 @@ App 以 APK 分发、不上商店，更新靠 App 自己查 GitHub Releases、�
 | 构建号 | Android versionCode，由 `tooling/build-apk.sh` 按构建时间生成，见「构建号」 | `10251234` |
 | tag | `v` + 版本名（不带 `+N`） | `v1.2.0`、`v1.3.0-beta.1` |
 | APK | `dsh-go-<版本名>-<flavor>.apk`，正式版 flavor 固定为 `arm64`；文件名不带 `+N`（GitHub 会改写 `+`） | `dsh-go-1.2.0-arm64.apk` |
+| iOS 安装包 | `dsh-go-<版本名>-ios-unsigned.ipa`：iOS 编译工作流 `ios-unsigned-ipa` 产物里的 `DSH-Go-unsigned.ipa`（必须是发版提交上的那次运行，且「Archive as for TestFlight, and look inside」这一步通过；归档检查失败时 IPA 照样会上传，那份不能用），上传 Release 时改成这个名字；只挂在 GitHub Release，不进 `SHA256SUMS` 和 `update.json` | `dsh-go-1.2.0-ios-unsigned.ipa` |
 | 增量补丁 | `dsh-go-<版本名>-from-<旧版本名>-arm64.dshdelta`，只发不到整包 60 % 的 | `dsh-go-1.2.0-from-1.1.0-arm64.dshdelta` |
 | 校验和 | `SHA256SUMS`，`sha256sum` 的标准输出，APK 和补丁都在里面 | `<hex>  dsh-go-1.2.0-arm64.apk` |
 | 清单 | `update.json`（schema 1），镜像和自托管源都读它 | 见下 |
@@ -77,21 +78,17 @@ versionCode = (年 - 2026) × 10^8 + MMDDhhmm      时钟固定按 UTC+8
 
 1. **改版本名**：`app/pubspec.yaml` 的 `version:`，版本名按 semver 升；`+1` 不动。之后打的开发包也带新版本名，不会被提示「更新」到这一版。
    - **同步使用说明**：按本版界面改动更新 `docs/guide/`，把 `docs/guide/README.md` 的 `> dsh-go X.Y.Z` 改成新版本名，`python3 app/tool/guide_sync.py` 重新生成 App 内置技能，`python3 app/tool/guide_sync.py --check` 通过再打包（它核对入口路径、界面文字、页面链接与版本号）。
-2. **只打包 arm64 正式版**（运行时要先 `runtime/build-runtime.sh` 产出 `runtime/out/`）。x64 仅供必要的本地模拟器验证，不上传、不放入正式更新清单：
+2. **只打包 arm64 正式版**（运行时要先 `runtime/build-runtime.sh arm64-v8a` 产出 `runtime/out/arm64-v8a/`；不带参数会多建一份用不上的 x86_64）。x64 仅供必要的本地模拟器验证，不上传、不放入正式更新清单：
 
    ```sh
    tooling/build-apk.sh
    ```
 
-   脚本顺带传 `DSH_APP_VERSION=<版本名>+<构建号>`，它只影响诊断信息里的版本（`lib/state/app_info.dart` 是编译期常量）；更新检查读的是系统里真实的 versionName / versionCode，不依赖它。
+   运行时里的 Node 和 Linux ONNX Runtime 装包前把调试信息（DWARF）清零了，文件布局不动。带调试信息的原件和打进 APK 的运行时出自同一次构建：用 Runtime 工作流的产物打包，就取同一次运行的 `runtime-debug-arm64-v8a` artifact（只保留 90 天）；在本机构建，就取 `runtime/out/arm64-v8a/debug/`。两种情况都连同同一次的 `build-report.json`（记着原件和装包件的 SHA-256）一起留存，以后定位引擎崩溃用，不上传到发布线路。
 
-   **公测起**（GitHub Release 和公开渠道的包）打开求 star 提示，内测包不加：
+   脚本顺带传 `DSH_APP_VERSION=<版本名>+<构建号>`（`app/lib/state/app_info.dart`），作为诊断信息和更新状态的编译期默认版本。设置和关于页读取更新状态中的版本；原生版本读取成功且版本名可解析时，更新状态改用系统提供的 `versionName` / `versionCode`，读取失败或版本名无法解析时保留默认值。
 
-   ```sh
-   tooling/build-apk.sh -- --dart-define=DSH_STAR_PROMPT=true
-   ```
-
-   提示的触发条件见 `docs/design/star-prompt.md`；使用时长从装上这个包算起。
+   脚本给正式包自动打开求 star 提示（开头一行带 `· star prompt`）：`DSH_STAR_PROMPT=true` 写在 `tooling/star-prompt-on.json` 里，排在 `--` 后面的额外参数前面传给 flutter，所以额外参数里再写 `DSH_STAR_PROMPT`（行内或文件）以额外参数为准。`--beta`、`--side`、`--debug`/`--profile` 的包不加，`--no-star` 可以手动关掉。以前要手动加这个参数，最近的正式包漏了（1.3.0 确认没加，1.1.0、1.2.0 的打包记录里也没有），装这些版本的人一次都没被问过。提示的触发条件见 `docs/design/star-prompt.md`；使用时长从装上这个包算起。
 3. **确认签名**：对要发布的 arm64 APK 执行 `apksigner verify -v --min-sdk-version 21 --print-certs`。v1、v2、v3 三种签名都要是 `true`（v1 给仍读 JAR 签名的安装器和安全扫描；不加 `--min-sdk-version` 时 apksigner 按 minSdk 26 不查 v1），证书主题不得含 `CN=Android Debug`，证书 SHA-256 必须与上一版一致。验证失败时不要生成或上传 `dist/`、`update.json`。
 4. **生成资产**（改名、算校验和、写 `update.json`）。默认只收录 arm64；版本名取 pubspec，构建号用 `aapt2` 从 APK 里读。版本名不匹配或构建号还是占位的 `1` 时脚本直接报错：
 
@@ -134,7 +131,7 @@ CF_TOKEN_FILE=<token 文件> scripts/beta-keys.sh add beta-1 --out <文件>   # 
 **每次发内测版**：
 
 1. 改版本名（`app/pubspec.yaml`）并同步使用说明（同上「发版步骤」第 1 步，`guide_sync.py --check` 通过），在 `docs/changelog.md` 写好 `## X.Y.Z · 日期`，下面 `### 中文`、`### English` 两节——页面和 App 弹窗的更新说明从这里取，缺一节脚本就停。
-2. 打包：`tooling/build-apk.sh`（arm64）。第一行要带 `· beta channel`，说明令牌已编进去；没有令牌文件、或 `--debug` / `--profile` 的包都不带，它们只查 GitHub。
+2. 打包：`tooling/build-apk.sh --beta`（arm64）。须有非空的通道令牌文件，缺失时脚本报错。第一行要带 `· beta channel`，说明令牌已编进去；`--debug` / `--profile` 不带通道令牌，不走内测通道。
 3. 确认签名（同上第 3 步），生成资产：`python3 tooling/release_assets.py`，产物在 `dist/`。
 4. 上传并实测：
 
@@ -156,7 +153,7 @@ CF_TOKEN_FILE=<token 文件> scripts/beta-keys.sh add beta-1 --out <文件>   # 
 | 查看 | `list`：标签、创建、过期、状态，不显示密钥 |
 | 吊销 | `revoke <标签>`；KV 全球生效要一分钟左右，已发出的下载链接最多再用 10 分钟 |
 | 换掉所有密钥 | `init --rotate` 换 `BETA_SECRET`，旧密钥全部失效（通道令牌不受影响），再 `add` 新的 |
-| 通道令牌 | `channel-add <标签>` / `channel-list` / `channel-revoke <标签>`。换令牌：新令牌另存一个文件，`BETA_TOKEN_FILE=<新文件> … channel-add app-2`，之后的包用新令牌（`DSH_BETA_TOKEN_FILE=<新文件> tooling/build-apk.sh`）；等旧包的人都升级了再吊销 `app-1`，否则他们就收不到更新了 |
+| 通道令牌 | `channel-add <标签>` / `channel-list` / `channel-revoke <标签>`。换令牌：新令牌另存一个文件，`BETA_TOKEN_FILE=<新文件> … channel-add app-2`，之后的包用新令牌（`DSH_BETA_TOKEN_FILE=<新文件> tooling/build-apk.sh --beta`）；等旧包的人都升级了再吊销 `app-1`，否则他们就收不到更新了 |
 
 **回滚**：把上一版的清单重新设为最新，新版文件留着不影响（在 `services/share-worker` 下，环境变量 `CLOUDFLARE_API_TOKEN` 取自 token 文件，`CLOUDFLARE_ACCOUNT_ID` 取自 `~/keys/dshgo-cloudflare-account-id`）。公开下载桶、GitHub 和香港桶见「发版到三条线路」的回滚表。
 
@@ -405,8 +402,8 @@ App 的签名预检认 lineage：新包的签名历史里含已装版本的签�
 ## App 怎么更新
 
 ```text
-启动 6 秒后（每天最多一次，设置里可关）或 设置 → 关于 → 检查更新
-  → 依次问元数据源（见「镜像与回落」），第一个给出可用版本的为准
+启动 6 秒后或从后台返回时（到期才查，设置里可关），也可在 设置 → 关于 → 检查更新 手动刷新
+  → 比较可达的官方清单，选版本最新的一个；官方源均不可用时才问公共加速镜像
   → 比已装版本新、且没被「跳过」→ 弹窗：版本、下载大小（有补丁可用时是补丁的大小）、更新说明
   → 立即更新：有补丁就下补丁、用已装 APK 拼出新包，否则下整包；都在 cache/updates/，断点续传，可取消，关掉弹窗也继续
   → SHA-256 校验（不一致删掉、换下一个源从头下）
@@ -417,7 +414,7 @@ App 的签名预检认 lineage：新包的签名历史里含已装版本的签�
 
 - **节流**：成功检查后 24 小时内不再自动查；失败后 4 小时内不重试；时钟被往回拨视为到期。手动检查不受限。
 - **跳过这个版本**：这个版本不再自动弹，有更新的版本照常提醒；「关于」里显示「已跳过」。手动检查仍会打开弹窗。
-- **稍后**：只关弹窗，下次自动检查（次日）还会提醒。
+- **稍后**：只关弹窗，不跳过版本或关闭自动检查；达到间隔后启动或回到前台会重新联网检查。
 - **上次的结果会缓存**：重启后不联网也能看到「新版本」标记；装好新版后自动清掉缓存和残留安装包。
 - **导出安装包**：「可以安装」，或签名不一致 / 安装被拦截的失败界面，可以「导出安装包」：把校验过的包复制到 `Download/DSH-Go/`（MediaStore，文件名就是清单里的资产名）。这是给「首次安装被厂商拦、只能自己重签」的人兜底，不是常规更新路径——重签后的包和官方签名不同，App 内更新会一直停在「签名不一致」，以后每版都得手动重签覆盖装。能走 Shizuku / 本机 ADB 就别走这条路。导出只是复制，`cache/updates/` 里的原文件、安装和清理逻辑都不变（提权安装器要求文件直接在 `cache/updates` 下，别把下载目录搬走）。
 - **磁盘**：开始下载前要求可用空间 ≥ 安装包 × 2 + 64 MB（下载 + 安装暂存）。走补丁也是这个门槛：补丁拼完就删，峰值仍是安装暂存那一刻。
@@ -457,15 +454,15 @@ App 这边（`app/lib/update/delta.dart`、`app/lib/state/update_state.dart`）�
 
 ## 镜像与回落
 
-源列表集中在 `app/lib/update/update_config.dart`。元数据按下表从上到下问，下载按镜像顺序试。除了内测通道和 GitHub API，**上次成功的源排到最前**，连不上某个源的手机不会每次都先等它超时；GitHub API 哪怕上次成功也排最后。
+源列表集中在 `app/lib/update/update_config.dart`。内测通道（仅内测包）、自有下载站和 GitHub 清单并行读取，选版本最高者；同版本按这个顺序优先，保留对应的下载地址和补丁。GitHub 清单不可用时才查 API，所有官方源都不可用才比较公共加速镜像。下载线路的顺序和校验不变。
 
 | 源 | 用于 | 好处 | 坏处 |
 |---|---|---|---|
-| 内测通道 `go.dshtui.com/beta/update.json`（带通道令牌的包才有，永远排第一，不参与「上次成功排最前」） | 元数据 + APK（同一令牌） | 不公开；国内可达；发版即生效 | 令牌编在包里，可被提取；没令牌的包用不了 |
+| 内测通道 `go.dshtui.com/beta/update.json`（带通道令牌的包才有，同版本优先） | 元数据 + APK（同一令牌） | 不公开；国内可达；发版即生效 | 令牌编在包里，可被提取；没令牌的包用不了 |
 | 自有下载站 `dl.dshtui.com`（R2 公共桶，所有包默认都有） | 元数据 `/update.json`（最新公开版，资产带绝对地址）+ APK 和补丁 `/download/<版本>/<文件>`（下载也排第一） | 自己的，完全可控；不占 GitHub 配额；有补丁 | 流量和可达性要自己盯；国内速度看 Cloudflare 线路 |
 | `github.com/…/releases/latest/download/update.json` | 元数据 + APK | 不占 API 配额；和 APK 同一个 CDN | 国内常慢或不通 |
 | 公共加速镜像（默认 `ghfast.top`、`gh-proxy.com`） | 元数据 + APK | 零成本，国内大多能用 | 第三方：随时失效、换域名（几个月一换很常见），有的整段网络一律 403（`ghfast.top` 2026-11 起从我们机器出去全是 403，仍留在列表里，被拒只多一次请求）；能看到下载者 IP；大文件可能限速；理论上能篡改内容（见下） |
-| GitHub API `releases/latest`（最后） | 元数据 | 官方；带 digest，不额外请求校验和 | 匿名 60 次/小时/IP，校园网、运营商 NAT 和代理出口下常常已经 403；回答里没有补丁；国内常超时 |
+| GitHub API `releases/latest`（GitHub 清单失败时） | 元数据 | 官方；带 digest，不额外请求校验和 | 匿名 60 次/小时/IP，校园网、运营商 NAT 和代理出口下常常已经 403；回答里没有补丁；国内常超时 |
 
 构建时可以改（`--dart-define`，不用改代码）：
 

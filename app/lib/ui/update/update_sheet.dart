@@ -35,7 +35,7 @@ Future<void> checkForUpdates(BuildContext context, WidgetRef ref) async {
   await controller.ready;
   if (!context.mounted) return;
   final update = ref.read(appUpdateProvider);
-  if (update.hasUpdate || update.hasSelfUpdateResult) return showUpdateSheet(context);
+  if (update.hasSelfUpdateResult || (update.busy && update.hasUpdate)) return showUpdateSheet(context);
   final messenger = ScaffoldMessenger.maybeOf(context);
   final phase = await controller.check();
   if (!context.mounted) return;
@@ -229,7 +229,7 @@ class _UpdateSheetState extends ConsumerState<UpdateSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SheetTitleBar(l10n.updateNewVersionFound),
+          SheetTitleBar(update.checkFailure == null ? l10n.updateNewVersionFound : l10n.updateTileUnavailable),
           Flexible(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(SheetTitleBar.inset, 0, SheetTitleBar.inset, 8),
@@ -282,13 +282,14 @@ class _UpdateSheetState extends ConsumerState<UpdateSheet> {
                       ),
                     ],
                   ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
-                    child: Text(
-                      l10n.updateInstallKeepsData,
-                      style: theme.textTheme.bodySmall?.copyWith(color: colors.textTertiary),
+                  if (!update.noticeOnly)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
+                      child: Text(
+                        l10n.updateInstallKeepsData,
+                        style: theme.textTheme.bodySmall?.copyWith(color: colors.textTertiary),
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -411,6 +412,15 @@ class _UpdateSheetState extends ConsumerState<UpdateSheet> {
     final theme = Theme.of(context);
     final colors = DshColors.of(context);
     final scheme = theme.colorScheme;
+    if (update.noticeOnly) {
+      return _Notice(
+        icon: AppIcons.info,
+        background: colors.infoContainer,
+        foreground: colors.onInfoContainer,
+        title: l10n.harmonyUpdateNoticeTitle,
+        text: update.noticePage == null ? l10n.harmonyUpdateNoticeNoPage : l10n.harmonyUpdateNoticeText,
+      );
+    }
     if (_selfUpdateStatus(context, update) case final status?) return status;
     if (update.asset == null) {
       final abi = update.flavor?.name;
@@ -565,6 +575,32 @@ class _UpdateSheetState extends ConsumerState<UpdateSheet> {
       child: Text(label),
     );
 
+    // HarmonyOS only offers the release page, and only one the feed really names.
+    if (update.noticeOnly) {
+      final notice = update.noticePage;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (notice == null)
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: _buttonSize),
+              onPressed: close,
+              child: Text(l10n.commonClose),
+            )
+          else
+            pair(l10n.commonLater, close, l10n.updateOpenReleasePage, () => unawaited(_openPage(context, notice))),
+          if (!update.isSkipped)
+            TextButton(
+              onPressed: () {
+                unawaited(controller.skipLatest());
+                close();
+              },
+              child: Text(l10n.updateSkipVersion),
+            ),
+        ],
+      );
+    }
     if (update.selfUpdate.unresolved) {
       return Column(
         mainAxisSize: MainAxisSize.min,

@@ -60,6 +60,7 @@ extension _GameplayResolutionOperations on TavernEngine {
     final settingsIdentity = _document['settings'];
     final globalSettings = _map(settingsIdentity);
     final settingsText = jsonEncode(globalSettings);
+    final presetWorking = _capturePresetWorking(chatId: chat?.id);
     final personaVersion = _personas.authoringVersion;
     final persona = _personas.resolve(personaId: chat?.personaId);
     final chatVersion = chat == null ? null : _store.displayVersion(chat.id);
@@ -104,11 +105,19 @@ extension _GameplayResolutionOperations on TavernEngine {
         chat,
         metadata,
         selectedPreset: snapshot.selectedPreset?.raw,
+        selectedPresetId: snapshot.selectedPreset?.id,
+        presetWorking: presetWorking,
         managedRegex: managed,
       ),
       persona,
     );
     final actorData = _effectiveCard(cards[actorId]!.character!.card.data, settings);
+    final primaries = await _scripts._captureCharacterPrimaryBooks(settings, {
+      if (group == null)
+        actorId: actorData
+      else
+        for (final id in roster) id: cards[id]?.character?.card.data ?? <String, Object?>{},
+    });
     final legacy = await _captureGameplayLegacyResources(
       actorId: actorId,
       actorData: actorData,
@@ -119,6 +128,8 @@ extension _GameplayResolutionOperations on TavernEngine {
       metadata: metadata,
       personaId: persona.persona?.id,
       selectedPreset: snapshot.selectedPreset,
+      currentPreset: {'source': presetWorking.source, 'token': presetWorking.token},
+      primaries: primaries,
       regex: regex,
       capture: capture,
     );
@@ -133,6 +144,10 @@ extension _GameplayResolutionOperations on TavernEngine {
       );
     }
     void check() {
+      if (!_scripts._characterBookNamesCurrent(primaries.values)) _gameplayCaptureConflict();
+      if (!_presetWorkingCurrent(presetWorking)) {
+        _gameplayCaptureConflict();
+      }
       if (_authoringAuthority.domainId != snapshot.domainId ||
           !identical(_document['settings'], settingsIdentity) ||
           jsonEncode(_map(_document['settings'])) != settingsText ||
@@ -269,6 +284,8 @@ Future<List<_GameplayLegacyResource>> _captureGameplayLegacyResources({
   required Map<String, Object?> metadata,
   required String? personaId,
   required StoredPreset? selectedPreset,
+  required Map<String, Object?> currentPreset,
+  required Map<String, _CharacterPrimaryBook> primaries,
   required _AuthoringCapturedResource regex,
   required Future<_AuthoringCapturedResource> Function(TavernAuthoringTarget target) capture,
 }) async {
@@ -276,13 +293,27 @@ Future<List<_GameplayLegacyResource>> _captureGameplayLegacyResources({
   final bindings = _map(settings['lorebooks']);
   final activeName = metadata['world_info'];
   final activeId = activeName is String ? _map(chat?.settings['stLorebookIds'])[activeName] : null;
+  for (final entry in primaries.entries) {
+    if (entry.value.issue(entry.key) case final issue?) {
+      result.add((
+        kind: 'lorebook',
+        bucket: WorldInfoSource.character.name,
+        source: <String, Object?>{'kind': 'card', 'characterId': entry.key},
+        resource: <String, Object?>{'worldName': entry.value.worldName, 'phase': 'linked'},
+        present: false,
+        raw: null,
+        entries: <Map<String, Object?>>[],
+        issues: <Map<String, Object?>>[_characterBookMissing(issue)],
+      ));
+    }
+  }
   for (final bucket in WorldInfoSource.values) {
     final ids = <({String id, String? characterId, String? personaId})>[
       for (final id in _strings(bindings[bucket.name])) (id: id, characterId: null, personaId: null),
       if (bucket == WorldInfoSource.character)
-        for (final characterId in group == null ? [actorId] : [for (final member in group.members) member.characterId])
-          for (final id in _strings(_map(settings['characterLorebooks'])[characterId]))
-            (id: id, characterId: characterId, personaId: null),
+        for (final entry in primaries.entries)
+          for (final id in _characterLinkedBookIds(settings, entry.key, primary: entry.value))
+            (id: id, characterId: entry.key, personaId: null),
       if (bucket == WorldInfoSource.persona && personaId != null)
         for (final id in _strings(_map(settings['personaLorebooks'])[personaId]))
           (id: id, characterId: null, personaId: personaId),
@@ -412,7 +443,7 @@ Future<List<_GameplayLegacyResource>> _captureGameplayLegacyResources({
       _gameplayLegacyRegexArray(
         presetExtensions['regex_scripts'],
         bucket: 'preset',
-        source: {'kind': 'preset', 'presetId': selectedPreset?.id},
+        source: {'kind': 'preset', 'presetId': selectedPreset?.id, 'current': currentPreset},
         pointer: '/extensions/regex_scripts',
         enabled: enabled && settings['presetRegexEnabled'] != false,
       ),

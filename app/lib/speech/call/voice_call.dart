@@ -50,7 +50,7 @@ enum CallEnd { hungUp, permission, microphone, noRecognizer, background, failed 
 class CallReply {
   const CallReply(this.text, {required this.done});
 
-  /// Everything said so far (it only grows while [done] is false).
+  /// Latest visible reply. A durable message can replace a streaming draft.
   final String text;
 
   /// The turn ended.
@@ -98,6 +98,7 @@ class VoiceCallController extends ChangeNotifier {
     required this.choices,
     this.permission,
     this.cutNote,
+    this.verbatimInput,
     this.thinkingCue,
     this.confirmAfter = const Duration(milliseconds: 1600),
     this.cueAfter = const Duration(milliseconds: 1200),
@@ -112,6 +113,10 @@ class VoiceCallController extends ChangeNotifier {
   /// The line telling the model where the person cut its reply off ([heard]:
   /// the end of what they heard, '' when they cut in before a word).
   final String Function(String heard)? cutNote;
+
+  /// The conversation carries its call context separately from the user's
+  /// utterance. Do not attribute the app hint or a cut-off reply to them.
+  final bool Function()? verbatimInput;
 
   /// Plays the soft "still thinking" sound.
   final Future<void> Function()? thinkingCue;
@@ -145,6 +150,10 @@ class VoiceCallController extends ChangeNotifier {
   CallEnd? _ended;
   bool _muted = false;
   bool _speaker = true;
+  bool? _speakerPreference;
+  int _speakerRequest = 0;
+  Object? _speakerError;
+  Completer<void>? _initialSpeaker;
   double _micLevel = 0;
   double _voiceLevel = 0;
   String _heard = '';
@@ -177,7 +186,6 @@ class VoiceCallController extends ChangeNotifier {
   StreamSubscription<CallReply>? _replySub;
   SpeechOut? _out;
   StreamSubscription<SpeechOutEvent>? _outSub;
-  int _spoken = 0;
   bool _replyDone = true;
   int _turn = 0;
   int _recognizing = 0;
@@ -246,7 +254,7 @@ class VoiceCallController extends ChangeNotifier {
     if (_disposed || _phase == CallPhase.ended) return;
     _bargeIn = chosen.bargeIn;
     _pause = chosen.pause;
-    _speaker = chosen.speaker;
+    if (!audio.requiresSpeakerAck) _speaker = chosen.speaker;
     _spokenHint = chosen.spokenHint;
     notifyListeners();
     VoiceCloud? cloud;
@@ -274,15 +282,29 @@ class VoiceCallController extends ChangeNotifier {
       }
     }
     unawaited(const DiagnosticsChannel().recordVoiceStage('preparing'));
-    final started = await audio.startCall(bargeIn: _bargeIn, pause: _pause);
+    final started = audio.requiresSpeakerAck
+        ? await audio.startCallMuted(bargeIn: _bargeIn, pause: _pause, muted: _muted)
+        : await audio.startCall(bargeIn: _bargeIn, pause: _pause);
     if (_disposed || _phase == CallPhase.ended) {
-      if (started == CallStart.ok) unawaited(audio.stopCall());
+      // OH already retired this native generation in _end. Its old success
+      // acknowledgement must not issue a global stop after a newer call starts.
+      if (started == CallStart.ok && !audio.requiresSpeakerAck) unawaited(audio.stopCall());
       return;
     }
     switch (started) {
       case CallStart.ok:
         unawaited(const DiagnosticsChannel().recordVoiceStage('capture_started'));
-        _speaker = await audio.speaker(_speaker);
+        if (audio.requiresSpeakerAck) {
+          // A newer control can supersede this request while the call starts.
+          // start() still waits for the current acknowledgement or call end.
+          final ready = _initialSpeaker = Completer<void>();
+          unawaited(_setSpeakerChecked(_speakerPreference ?? chosen.speaker));
+          await ready.future;
+          return;
+        } else {
+          _speaker = await audio.speaker(_speaker);
+          if (_disposed || _phase == CallPhase.ended) return;
+        }
         _set(CallPhase.listening);
       case CallStart.permission:
         _end(CallEnd.permission);
@@ -387,7 +409,6 @@ class VoiceCallController extends ChangeNotifier {
     _reply = '';
     _said = '';
     _voiced = false;
-    _spoken = 0;
     _turn++;
     // Skipped while this was being made out: it still goes, its reply is not read.
     final hushed = mine == _hushed;
@@ -406,7 +427,7 @@ class VoiceCallController extends ChangeNotifier {
       _cueTimer = Timer(cueAfter, _cue);
       _set(CallPhase.thinking);
     }
-    final sent = await conversation.send(message);
+    final sent = await conversation.send(verbatimInput?.call() == true ? _heard : message);
     if (_phase == CallPhase.ended) return;
     if (!sent) {
       _replyDone = true;
@@ -418,11 +439,20 @@ class VoiceCallController extends ChangeNotifier {
   void _onReply(CallReply reply) {
     if (_phase == CallPhase.ended || _replyDone) return;
     final text = reply.text;
-    if (text.length > _spoken) {
-      if (_spoken == 0) unawaited(const DiagnosticsChannel().recordVoiceStage('reply_received'));
-      final out = _out ??= _newVoice();
-      out.add(text.substring(_spoken));
-      _spoken = text.length;
+    if (text != _reply) {
+      final extendsReply = text.startsWith(_reply);
+      if (!extendsReply) {
+        _stopVoice();
+        _said = '';
+        _voiced = false;
+      }
+      if (text.isNotEmpty) {
+        if (_reply.isEmpty) unawaited(const DiagnosticsChannel().recordVoiceStage('reply_received'));
+        final out = _out ??= _newVoice();
+        out.add(extendsReply ? text.substring(_reply.length) : text);
+      } else if (_phase == CallPhase.speaking) {
+        _set(CallPhase.thinking);
+      }
       _reply = text;
       if (_turns.isNotEmpty) _turns.last = CallTurn(_turns.last.you, her: text);
       notifyListeners();
@@ -486,6 +516,13 @@ class VoiceCallController extends ChangeNotifier {
       if (!identical(_out, out) || _phase == CallPhase.ended) return;
       switch (event) {
         case SpeechOutStarted():
+          if (_over) {
+            if (!out.canDuck) {
+              _cutIn();
+              return;
+            }
+            out.duck(true);
+          }
           _voiced = true;
           _cueTimer?.cancel();
           if (_phase == CallPhase.thinking || _phase == CallPhase.listening) _set(CallPhase.speaking);
@@ -550,7 +587,40 @@ class VoiceCallController extends ChangeNotifier {
 
   Future<void> setSpeaker(bool on) async {
     if (_phase == CallPhase.ended) return;
+    if (audio.requiresSpeakerAck) {
+      _speakerPreference = on;
+      return _setSpeakerChecked(on);
+    }
     _speaker = await audio.speaker(on);
+    notifyListeners();
+  }
+
+  Future<void> _setSpeakerChecked(bool on) async {
+    final request = ++_speakerRequest;
+    try {
+      final accepted = await audio.speaker(on);
+      if (_disposed || _phase == CallPhase.ended || request != _speakerRequest) return;
+      _speaker = accepted;
+      if (identical(_error, _speakerError)) _error = null;
+      _speakerError = null;
+      final ready = _initialSpeaker;
+      if (ready != null) {
+        _initialSpeaker = null;
+        _set(CallPhase.listening);
+        ready.complete();
+        return;
+      }
+    } catch (error) {
+      if (_disposed || _phase == CallPhase.ended || request != _speakerRequest) return;
+      // The existing call error state is safe for the UI's unawaited control.
+      // Keep the previous preference; the requested value was not accepted.
+      _error = _speakerError = error;
+      if (_initialSpeaker != null) {
+        // There is no acknowledged preference for this new call yet.
+        _end(CallEnd.failed);
+        return;
+      }
+    }
     notifyListeners();
   }
 
@@ -579,6 +649,7 @@ class VoiceCallController extends ChangeNotifier {
 
   void _end(CallEnd why) {
     if (_phase == CallPhase.ended) return;
+    if (audio.requiresSpeakerAck) _speakerRequest++;
     unawaited(const DiagnosticsChannel().recordVoiceStage('call_ended', code: why.index));
     _ended = why;
     _overTimer?.cancel();
@@ -588,6 +659,9 @@ class VoiceCallController extends ChangeNotifier {
     unawaited(_replySub?.cancel());
     unawaited(_audioSub?.cancel());
     _set(CallPhase.ended);
+    final ready = _initialSpeaker;
+    _initialSpeaker = null;
+    ready?.complete();
   }
 
   void _set(CallPhase phase) {
