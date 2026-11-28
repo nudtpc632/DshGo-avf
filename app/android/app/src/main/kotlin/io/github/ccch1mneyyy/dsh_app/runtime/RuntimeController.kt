@@ -84,6 +84,12 @@ class RuntimeController private constructor(private val app: Context) : DshProce
             null
         }
     }
+    /** This APK bundles the VM image but no PRoot rootfs archive (assets/runtime/manifest.json has no rootfs).
+     * Declared before init: init reads it through avfEngine(), and a Kotlin lazy
+     * declared after the init block is still null when init runs (NPE on getValue). */
+    private val avfOnly: Boolean by lazy {
+        avfBundledVersion != null && manifest.archives.isEmpty()
+    }
     @Volatile private var process: DshProcess? = null
     @Volatile private var avfProcess: AvfProcess? = null
     @Volatile private var lastLaunch: LaunchDiagnostics? = null
@@ -144,6 +150,9 @@ class RuntimeController private constructor(private val app: Context) : DshProce
     val safeRun: Boolean get() = runSafe
 
     init {
+        // An AVF-only build has no compatible launch to fall back to; a failed
+        // flag latched by an older build would block every start. Clear it once.
+        if (avfOnly && prefs.contains(K_AVF_FAILED)) prefs.edit().remove(K_AVF_FAILED).apply()
         phase = try {
             // "Installed" means the SELECTED backend is ready, matching status()'s
             // installedVersion. With AVF requested, a leftover PRoot rootfs does
@@ -251,11 +260,6 @@ class RuntimeController private constructor(private val app: Context) : DshProce
 
     /** The VM tool + guest kernel on the device, the MANAGE_VIRTUAL_MACHINE grant, and a bundled image. */
     private fun avfEngineAvailable(): Boolean = avfBundledVersion != null && AvfVm.supported(app)
-
-    /** This APK bundles the VM image but no PRoot rootfs archive (assets/runtime/manifest.json has no rootfs). */
-    private val avfOnly: Boolean by lazy {
-        avfBundledVersion != null && manifest.archives.isEmpty()
-    }
 
     private fun directEngineAvailable(): Boolean = runCatching {
         manifest.raw.optJSONObject("directEngine")?.optInt("schema") == 2
@@ -666,6 +670,10 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         val useAvf = avf.requested && !avf.failed && safeState != SafeState.ON
         val problem = try {
             when {
+                // An AVF-only build always starts AVF: a failed flag latched by an
+                // older build must not divert it to a PRoot runtime that is not bundled.
+                avfOnly && avfImage.installedVersion() == avfBundledVersion -> null
+                avfOnly -> "AVF image not installed"
                 useAvf && avfImage.installedVersion() == avfBundledVersion -> null
                 useAvf -> "AVF image not installed"
                 installer.isCurrent() -> null
@@ -691,7 +699,7 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         synchronized(runTail) { runTail.clear() }
         setPhase(Phase.STARTING)
         timeline.requested()
-        if (useAvf) {
+        if (useAvf || avfOnly) {
             startAvfProcess(gen)
             return
         }
@@ -915,13 +923,17 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                         // failure card, no strike (same contract as tawcroot); turning AVF on
                         // again retries. An AVF-only build has nothing to fall back to: show
                         // the start failure instead of restarting into a missing runtime.
-                        prefs.edit().putString(K_AVF_FAILED, avfBundledVersion ?: "").apply()
                         if (avfOnly) {
+                            // No fallback exists: never latch K_AVF_FAILED (it would turn
+                            // every later start into "runtime not installed"). A stale flag
+                            // from an older build is cleared so the next start retries AVF.
+                            prefs.edit().remove(K_AVF_FAILED).apply()
                             publishStartupFailure(startupError ?: "AVF VM exited during start (code $code)", ownerReleased = true)
                             DshService.postStoppedAlert(app)
                             DshService.stopSelfIfRunning(app, runGen, serviceRecovery.runStopOwner)
                             return@synchronized
                         }
+                        prefs.edit().putString(K_AVF_FAILED, avfBundledVersion ?: "").apply()
                         log("[dsh-app] AVF launch failed (exit $code${startupError?.let { ": $it" } ?: ""}); starting again with compatible launch", "system")
                         error = null
                         setPhase(Phase.STARTING)
